@@ -10,6 +10,7 @@ const VALID_SERVICES: Record<string, string[]> = {
   openai: ["generateText", "generateImage"],
   sendgrid: ["sendEmail"],
   twilio: ["sendMessage"],
+  nucleus: ["adjudicateClaim", "scoreOpportunity", "scoreRecommendation", "guardianStatus"],
 };
 
 Deno.serve(async (req) => {
@@ -108,6 +109,7 @@ function hasCredentials(service: string): boolean {
     case "openai": return !!Deno.env.get("OPENAI_KEY");
     case "sendgrid": return !!Deno.env.get("SENDGRID_KEY");
     case "twilio": return !!Deno.env.get("TWILIO_SID") && !!Deno.env.get("TWILIO_TOKEN") && !!Deno.env.get("TWILIO_PHONE");
+    case "nucleus": return !!Deno.env.get("NUCLEUS_API_KEY");
     default: return false;
   }
 }
@@ -130,6 +132,21 @@ function getMockResponse(service: string, action: string, data: Record<string, u
     twilio: {
       sendMessage: (d) => ({ sid: "SM_mock_" + Date.now(), status: "sent", to: d.to || "+10000000000", body: d.body || "" }),
     },
+    nucleus: {
+      adjudicateClaim: (d) => ({
+        decision: "allow",
+        reason: "Mock adjudication — no contract lookup performed",
+        adjudication: { status: "mock", allowed: d.billed_amount_cents || 0, plan_paid: 0, member_responsibility: 0, deductible_applied: 0, coinsurance: 0 },
+        risk_tier: "low",
+        used_empty_accumulators: true,
+        contract_id: null,
+        plan_id: null,
+        timestamp: new Date().toISOString(),
+      }),
+      scoreOpportunity: () => ({ stage: "opportunity", score: 0, fired_rules: [], claim_id: null, timestamp: new Date().toISOString() }),
+      scoreRecommendation: () => ({ stage: "recommendation", confidence: 0, action: "review", fired_rules: [], claim_id: null, timestamp: new Date().toISOString() }),
+      guardianStatus: () => ({ safe_to_process: true, kill_switch_active: false, reason: null, activated_by: null, kill_switch_updated_at: null, timestamp: new Date().toISOString() }),
+    },
   };
   return mocks[service]?.[action]?.(data) ?? { message: "Mock response" };
 }
@@ -147,6 +164,7 @@ async function executeAction(service: string, action: string, data: Record<strin
     case "openai": return executeOpenAI(action, data);
     case "sendgrid": return executeSendGrid(action, data);
     case "twilio": return executeTwilio(action, data);
+    case "nucleus": return executeNucleus(action, data);
     default: return { success: false, error: `Unhandled service: ${service}` };
   }
 }
@@ -212,4 +230,46 @@ async function executeTwilio(action: string, data: Record<string, unknown>) {
     return { success: true, data: { sid: body.sid, status: body.status, to: body.to, body: body.body } };
   }
   return { success: false, error: `Unknown Twilio action: ${action}` };
+}
+
+// nucleus base URLs are not secret — only the x-api-key credential is.
+const NUCLEUS_BASE_URL = "https://bpqukcsaoporhvdtfyza.supabase.co/functions/v1";
+
+async function executeNucleus(action: string, data: Record<string, unknown>) {
+  const key = getEnvOrThrow("NUCLEUS_API_KEY");
+
+  if (action === "guardianStatus") {
+    const resp = await fetch(`${NUCLEUS_BASE_URL}/guardian-status`, {
+      method: "GET",
+      headers: { "x-api-key": key },
+    });
+    const body = await resp.json();
+    if (!resp.ok) return { success: false, error: `Nucleus guardian-status error [${resp.status}]: ${body?.reason || JSON.stringify(body)}` };
+    return { success: true, data: body };
+  }
+
+  if (action === "adjudicateClaim") {
+    const resp = await fetch(`${NUCLEUS_BASE_URL}/adjudicate-claim`, {
+      method: "POST",
+      headers: { "x-api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    const body = await resp.json();
+    if (!resp.ok) return { success: false, error: `Nucleus adjudicate-claim error [${resp.status}]: ${body?.reason || JSON.stringify(body)}` };
+    return { success: true, data: body };
+  }
+
+  if (action === "scoreOpportunity" || action === "scoreRecommendation") {
+    const stage = action === "scoreOpportunity" ? "opportunity" : "recommendation";
+    const resp = await fetch(`${NUCLEUS_BASE_URL}/weaver-score`, {
+      method: "POST",
+      headers: { "x-api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify({ stage, claim_id: data.claim_id ?? data.claimId, facts: data.facts ?? {} }),
+    });
+    const body = await resp.json();
+    if (!resp.ok) return { success: false, error: `Nucleus weaver-score error [${resp.status}]: ${body?.reason || JSON.stringify(body)}` };
+    return { success: true, data: body };
+  }
+
+  return { success: false, error: `Unknown Nucleus action: ${action}` };
 }
