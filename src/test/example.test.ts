@@ -1,6 +1,3 @@
-# `src/test/example.test.ts`
-
-```ts
 import { describe, expect, it } from "vitest";
 
 describe("Glue runtime invariants", () => {
@@ -179,4 +176,3 @@ describe("Glue runtime invariants", () => {
     });
   });
 });
-```
