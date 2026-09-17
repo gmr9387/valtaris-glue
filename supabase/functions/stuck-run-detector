@@ -1,23 +1,28 @@
-// supabase/functions/repair-run/index.ts
-// Valtaris Glue — Central Run Repair Engine (Generation 3)
+// supabase/functions/stuck-run-detector/index.ts
+// Valtaris Glue — Stuck Run Sweep (Generation 3)
 //
 // This file is responsible for:
-//   - repairing invariant violations
-//   - repairing expired leases
-//   - repairing stuck jobs
-//   - repairing stuck step-runs
-//   - repairing inconsistent run states
-//   - dispatching to job-lifecycle + step-lifecycle
-//   - emitting repair events
+//   - periodically scanning all "running" workflow_runs
+//   - delegating detection + repair of each one to repair-stuck-run
+//     (which does its own staleness checks and is explicitly designed
+//     to be called by this function -- see its own header: "Called by
+//     check-invariants, stuck-run-detector, SLA sweeper")
 //
 // Authority chain:
-//   check-invariants → repair-run → job-lifecycle / step-lifecycle / run-lifecycle
+//   stuck-run-detector → repair-stuck-run → schedule-next-job
 //
 // This file NEVER:
 //   - executes connectors
-//   - creates jobs directly
+//   - repairs anything itself (always delegates to repair-stuck-run)
 //   - mutates workflow_versions
 //   - bypasses RLS
+//
+// Restored 2026-09-17: this file's deployed bytes were previously an
+// exact copy of repair-run's source (confirmed via md5sum) -- a
+// different, action-taking function with an incompatible request
+// contract ({run_id, type, job_id, step_id}, not a no-body sweep) --
+// so this cron-style sweep never actually ran and repair-stuck-run's
+// real logic had no real caller feeding it besides check-invariants.
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -27,178 +32,36 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
 );
 
-const NOW = () => new Date();
-const NOW_ISO = () => new Date().toISOString();
-
 serve(async (req) => {
   try {
-    const body = await req.json();
-    const { run_id, type, job_id, step_id } = body;
+    const { data: runningRuns, error } = await supabase
+      .from("workflow_runs")
+      .select("id")
+      .eq("state", "running");
 
-    if (!run_id || !type) {
-      return jsonError("missing-fields", 400);
+    if (error) {
+      console.error("stuck-run-detector load error:", error);
+      return jsonError("load-failed", 500, error);
     }
 
-    // Emit repair event
-    await emitRepairEvent(run_id, type, job_id, step_id);
-
-    switch (type) {
-      case "expired-lease":
-        await repairExpiredLease(job_id);
-        break;
-
-      case "step-run-timeout":
-        await repairStepTimeout(run_id, step_id);
-        break;
-
-      case "missing-step-run":
-        await repairMissingStepRun(run_id, job_id);
-        break;
-
-      case "invalid-step-run":
-        await repairInvalidStepRun(run_id, step_id);
-        break;
-
-      case "run-completed-with-active-jobs":
-        await forceRunFailed(run_id, "completed_with_active_jobs");
-        break;
-
-      case "run-running-with-no-active-jobs":
-        await forceRunFailed(run_id, "running_with_no_active_jobs");
-        break;
-
-      case "job-running-with-terminal-step":
-        await forceJobFailed(job_id, "terminal_step_state");
-        break;
-
-      case "step-completed-with-noncompleted-job":
-        await forceStepFailed(run_id, step_id, "job_not_completed");
-        break;
-
-      case "run-failed-without-compensation":
-        await forceRunFailed(run_id, "missing_compensation");
-        break;
-
-      default:
-        return jsonError("unknown-repair-type", 400);
+    const checked: string[] = [];
+    for (const run of runningRuns ?? []) {
+      await supabase.functions.invoke("repair-stuck-run", {
+        body: { run_id: run.id },
+      });
+      checked.push(run.id);
     }
 
     return jsonOK({
-      status: "repair-complete",
-      run_id,
-      type,
+      status: "stuck-run-sweep-complete",
+      runs_checked: checked.length,
+      run_ids: checked,
     });
   } catch (err) {
-    console.error("repair-run fatal error:", err);
-    return jsonError("repair-run-failed", 500, err);
+    console.error("stuck-run-detector fatal error:", err);
+    return jsonError("stuck-run-detector-failed", 500, err);
   }
 });
-
-// ------------------------------------------------------------
-// Repair Actions
-// ------------------------------------------------------------
-
-async function repairExpiredLease(job_id: string) {
-  await supabase.functions.invoke("job-lifecycle", {
-    body: {
-      job_id,
-      action: "fail",
-      error: "lease-expired",
-    },
-  });
-}
-
-async function repairStepTimeout(run_id: string, step_id: string) {
-  await supabase.functions.invoke("step-lifecycle", {
-    body: {
-      run_id,
-      step_id,
-      action: "fail",
-      error: "step-timeout",
-    },
-  });
-}
-
-async function repairMissingStepRun(run_id: string, job_id: string) {
-  const job = await loadJob(job_id);
-  if (!job) return;
-
-  await supabase.from("workflow_step_runs").insert({
-    run_id,
-    step_id: job.step_id,
-    state: "failed",
-    error: "missing-step-run",
-    created_at: NOW(),
-  });
-}
-
-async function repairInvalidStepRun(run_id: string, step_id: string) {
-  await supabase.from("workflow_step_runs").insert({
-    run_id,
-    step_id,
-    state: "failed",
-    error: "invalid-step-run",
-    created_at: NOW(),
-  });
-}
-
-async function forceRunFailed(run_id: string, reason: string) {
-  await supabase.functions.invoke("run-lifecycle", {
-    body: {
-      run_id,
-      action: "fail",
-      error: reason,
-    },
-  });
-}
-
-async function forceJobFailed(job_id: string, reason: string) {
-  await supabase.functions.invoke("job-lifecycle", {
-    body: {
-      job_id,
-      action: "fail",
-      error: reason,
-    },
-  });
-}
-
-async function forceStepFailed(run_id: string, step_id: string, reason: string) {
-  await supabase.functions.invoke("step-lifecycle", {
-    body: {
-      run_id,
-      step_id,
-      action: "fail",
-      error: reason,
-    },
-  });
-}
-
-// ------------------------------------------------------------
-// Loaders
-// ------------------------------------------------------------
-
-async function loadJob(jobId: string) {
-  const { data } = await supabase
-    .from("workflow_jobs")
-    .select("*")
-    .eq("id", jobId)
-    .single();
-  return data ?? null;
-}
-
-// ------------------------------------------------------------
-// Event Helper
-// ------------------------------------------------------------
-
-async function emitRepairEvent(run_id: string, type: string, job_id?: string, step_id?: string) {
-  await supabase.from("workflow_events").insert({
-    run_id,
-    step_id: step_id ?? null,
-    type: `repair.${type}`,
-    details: { job_id, step_id },
-    created_at: NOW(),
-  });
-}
 
 // ------------------------------------------------------------
 // Response Helpers

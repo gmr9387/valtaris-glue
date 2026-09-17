@@ -1,4 +1,4 @@
-project_id = "cqjdncuaxffowqnujaea"
+project_id = "celsunibpzdpdittshzt"
 
 [functions.run-worker]
 verify_jwt = false

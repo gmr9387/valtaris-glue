@@ -1,21 +1,28 @@
-// supabase/functions/worker-finalize/index.ts
-// Valtaris Glue — Worker Finalization Engine (Generation 3)
+// supabase/functions/run-worker/index.ts
+// Valtaris Glue — Job Runner (Generation 3)
 //
 // This file is responsible for:
-//   - finalizing job execution inside the worker
-//   - reporting job completion or failure
-//   - releasing job leases
-//   - emitting worker.finalized events
-//   - handing control back to job-lifecycle + step-lifecycle
+//   - loading a triggered job and its graph node
+//   - claiming the job for this worker invocation
+//   - executing the step via execute-step
+//   - reporting the outcome to worker-finalize
 //
 // Authority chain:
-//   run-worker → worker-finalize → job-lifecycle → step-lifecycle → schedule-next-job
+//   trigger-job → run-worker → execute-step → connector-wrapper → adapter
+//   run-worker → worker-finalize
 //
 // This file NEVER:
-//   - executes connectors
+//   - talks to connectors directly (always via execute-step)
 //   - mutates workflow_versions
 //   - bypasses RLS
 //   - schedules jobs directly
+//
+// Restored 2026-09-17: this file's deployed bytes were previously an
+// exact copy of worker-finalize's source (confirmed via md5sum), so
+// run-worker itself had no real logic -- trigger-job's handoff to it
+// silently did nothing but re-run worker-finalize's job-lookup/lease-
+// release/job-lifecycle-forwarding logic on a job that had not
+// actually been executed yet.
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -25,105 +32,98 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
 );
 
-const NOW = () => new Date();
-
 serve(async (req) => {
   try {
     const body = await req.json();
-    const { job_id, worker_id, status, result, error } = body;
+    const { job_id } = body;
 
-    if (!job_id || !worker_id || !status) {
-      return jsonError("missing-fields", 400);
+    if (!job_id) {
+      return jsonError("missing-job-id", 400);
     }
 
     const job = await loadJob(job_id);
     if (!job) return jsonError("job-not-found", 404);
 
-    // Emit worker.finalized event
-    await emitEvent(job.run_id, job.step_id, "worker.finalized", {
-      worker_id,
-      job_id,
-      status,
-      result,
-      error,
-    });
+    const run = await loadRun(job.run_id);
+    if (!run) return jsonError("run-not-found", 404);
 
-    // Release lease
-    await releaseLease(job_id, worker_id);
+    const version = await loadVersion(run.workflow_version_id);
+    if (!version) return jsonError("version-not-found", 404);
 
-    // Forward to job-lifecycle
-    if (status === "completed") {
-      await supabase.functions.invoke("job-lifecycle", {
+    const node = (version.graph?.nodes ?? []).find((n: any) => n.id === job.step_id);
+    if (!node) return jsonError("step-not-in-graph", 404);
+
+    // This invocation IS the worker for this job -- claim it so
+    // worker-finalize's releaseLease (which matches on claimed_by) can
+    // find it again.
+    const worker_id = crypto.randomUUID();
+    await supabase
+      .from("workflow_jobs")
+      .update({ claimed_by: worker_id })
+      .eq("id", job_id);
+
+    let status: "completed" | "failed";
+    let result: unknown = null;
+    let error: unknown = null;
+
+    try {
+      const { data, error: stepError } = await supabase.functions.invoke("execute-step", {
         body: {
+          run_id: job.run_id,
+          step_id: job.step_id,
           job_id,
-          action: "complete",
-          result,
+          node,
+          adapter: node.connector,
+          payload: job.payload,
         },
       });
-    } else if (status === "failed") {
-      await supabase.functions.invoke("job-lifecycle", {
-        body: {
-          job_id,
-          action: "fail",
-          error,
-        },
-      });
-    } else {
-      return jsonError("invalid-status", 400);
+
+      if (stepError) throw stepError;
+
+      status = "completed";
+      result = data?.result ?? data;
+    } catch (err) {
+      status = "failed";
+      error = err instanceof Error ? err.message : String(err);
     }
 
+    await supabase.functions.invoke("worker-finalize", {
+      body: { job_id, worker_id, status, result, error },
+    });
+
     return jsonOK({
-      status: "worker-finalized",
+      status: "run-worker-dispatched",
       job_id,
       worker_id,
-      lifecycle_action: status,
+      outcome: status,
     });
   } catch (err) {
-    console.error("worker-finalize fatal error:", err);
-    return jsonError("worker-finalize-failed", 500, err);
+    console.error("run-worker fatal error:", err);
+    return jsonError("run-worker-failed", 500, err);
   }
 });
 
 // ------------------------------------------------------------
-// Load Job
+// Loaders
 // ------------------------------------------------------------
 
 async function loadJob(jobId: string) {
-  const { data } = await supabase
-    .from("workflow_jobs")
-    .select("*")
-    .eq("id", jobId)
-    .single();
+  const { data } = await supabase.from("workflow_jobs").select("*").eq("id", jobId).single();
   return data ?? null;
 }
 
-// ------------------------------------------------------------
-// Release Lease
-// ------------------------------------------------------------
-
-async function releaseLease(job_id: string, worker_id: string) {
-  await supabase
-    .from("workflow_jobs")
-    .update({
-      claimed_by: null,
-      lease_expires_at: null,
-    })
-    .eq("id", job_id)
-    .eq("claimed_by", worker_id);
+async function loadRun(runId: string) {
+  const { data } = await supabase.from("workflow_runs").select("*").eq("id", runId).single();
+  return data ?? null;
 }
 
-// ------------------------------------------------------------
-// Event Helper
-// ------------------------------------------------------------
-
-async function emitEvent(run_id: string, step_id: string, type: string, details: any) {
-  await supabase.from("workflow_events").insert({
-    run_id,
-    step_id,
-    type,
-    details,
-    created_at: NOW(),
-  });
+async function loadVersion(versionId: string) {
+  const { data } = await supabase
+    .from("workflow_versions")
+    .select("*")
+    .eq("id", versionId)
+    .single();
+  return data ?? null;
 }
 
 // ------------------------------------------------------------

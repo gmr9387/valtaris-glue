@@ -1,21 +1,29 @@
-// supabase/functions/init-workflow/index.ts
-// Valtaris Glue — Workflow Run Initializer (Generation 3)
+// supabase/functions/schedule-next-job/index.ts
+// Valtaris Glue — DAG Progression Scheduler (Generation 3)
 //
 // This file is responsible for:
-//   - creating workflow_runs
-//   - pinning workflow_version_id
-//   - storing initial input
-//   - emitting workflow.created events
-//   - handing off to execute-workflow
+//   - determining which graph nodes are newly ready after a job/step
+//     transition (completed, failed, retried, dead-lettered, repaired)
+//   - creating jobs for newly-ready nodes via ensure_downstream_job
+//   - finalizing the run once no jobs remain
 //
 // Authority chain:
-//   workflow-publish → init-workflow → execute-workflow → ensure_downstream_job
+//   job-lifecycle / step-lifecycle / repair-* → schedule-next-job → ensure_downstream_job
 //
 // This file NEVER:
 //   - executes connectors
-//   - creates jobs
 //   - mutates workflow_versions
+//   - triggers jobs directly (trigger-job/a scheduler picks up "pending" jobs)
 //   - bypasses RLS
+//
+// Restored 2026-09-17: this file's deployed bytes were previously an
+// exact copy of init-workflow's source (confirmed via md5sum), so
+// every real caller (job-lifecycle, step-lifecycle, repair-job,
+// repair-step-run, repair-stuck-run, repair-compensation -- all call
+// this with { run_id } after a job/step transitions) was silently
+// re-running init-workflow's "create a new run" logic instead of
+// progressing the DAG, and no run ever advanced past its initial step
+// or got finalized.
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -28,54 +36,145 @@ const supabase = createClient(
 serve(async (req) => {
   try {
     const body = await req.json();
-    const { workflow_version_id, input } = body;
+    const { run_id } = body;
 
-    if (!workflow_version_id) {
-      return jsonError("missing-workflow-version-id", 400);
+    if (!run_id) {
+      return jsonError("missing-run-id", 400);
     }
 
-    const version = await loadVersion(workflow_version_id);
+    const run = await loadRun(run_id);
+    if (!run) return jsonError("run-not-found", 404);
+
+    const version = await loadVersion(run.workflow_version_id);
     if (!version) return jsonError("version-not-found", 404);
 
-    // Create run
-    const run_id = crypto.randomUUID();
+    const nodes: any[] = version.graph?.nodes ?? [];
+    const existingJobs = await loadJobs(run_id);
+    const stepRuns = await loadStepRuns(run_id);
 
-    await supabase.from("workflow_runs").insert({
-      id: run_id,
-      workflow_version_id,
-      state: "created",
-      input: input ?? {},
-      created_at: new Date(),
-    });
+    const jobbedStepIds = new Set(existingJobs.map((j: any) => j.step_id));
+    const latestStepState = latestStateByStep(stepRuns);
 
-    // Emit workflow.created event
-    await supabase.from("workflow_events").insert({
-      run_id,
-      step_id: null,
-      type: "workflow.created",
-      details: { workflow_version_id },
-      created_at: new Date(),
-    });
+    const scheduled: string[] = [];
 
-    // Immediately hand off to execute-workflow
-    await supabase.functions.invoke("execute-workflow", {
-      body: { run_id },
-    });
+    for (const node of nodes) {
+      if (jobbedStepIds.has(node.id)) continue; // already has a job
+
+      if (isReady(node, nodes, latestStepState)) {
+        await supabase.rpc("ensure_downstream_job", {
+          p_run_id: run_id,
+          p_step_id: node.id,
+        });
+
+        await supabase.from("workflow_events").insert({
+          run_id,
+          step_id: node.id,
+          type: "job.scheduled",
+          details: { step_id: node.id },
+          created_at: new Date(),
+        });
+
+        scheduled.push(node.id);
+      }
+    }
+
+    // If nothing is pending/running anymore, the run is done.
+    const stillActive = await hasActiveJobs(run_id);
+    if (!stillActive) {
+      await supabase.rpc("finalize_run_if_terminal", { p_run_id: run_id });
+    }
 
     return jsonOK({
-      status: "workflow-initialized",
+      status: "schedule-evaluated",
       run_id,
-      workflow_version_id,
+      scheduled,
+      finalized_check: !stillActive,
     });
   } catch (err) {
-    console.error("init-workflow fatal error:", err);
-    return jsonError("init-workflow-failed", 500, err);
+    console.error("schedule-next-job fatal error:", err);
+    return jsonError("schedule-next-job-failed", 500, err);
   }
 });
 
 // ------------------------------------------------------------
-// Load Version
+// Readiness
 // ------------------------------------------------------------
+//
+// A node can be reached via up to four edge types from its
+// predecessors (next/on_failure/on_approval/on_compensation). Each
+// edge type is an alternate path with its own trigger condition on
+// the predecessor's terminal step-run state. A "next" join requires
+// ALL next-predecessors to have completed (standard AND-join); the
+// other edge types are OR-branches -- any one predecessor reaching
+// that state is enough to take that path.
+
+const EDGE_TRIGGER_STATE: Record<string, string> = {
+  next: "completed",
+  on_failure: "failed",
+  on_approval: "approved",
+  on_compensation: "compensated",
+};
+
+function isReady(
+  node: any,
+  allNodes: any[],
+  latestStepState: Map<string, string>
+): boolean {
+  const incoming: { from: string; edge: keyof typeof EDGE_TRIGGER_STATE }[] = [];
+
+  for (const candidate of allNodes) {
+    for (const edge of ["next", "on_failure", "on_approval", "on_compensation"] as const) {
+      const list = candidate[edge] ?? [];
+      if (Array.isArray(list) && list.includes(node.id)) {
+        incoming.push({ from: candidate.id, edge });
+      }
+    }
+  }
+
+  if (incoming.length === 0) return false; // root nodes are seeded by execute-workflow
+
+  const byEdge = new Map<string, { from: string; edge: string }[]>();
+  for (const inc of incoming) {
+    if (!byEdge.has(inc.edge)) byEdge.set(inc.edge, []);
+    byEdge.get(inc.edge)!.push(inc);
+  }
+
+  for (const [edge, preds] of byEdge) {
+    const triggerState = EDGE_TRIGGER_STATE[edge];
+    if (edge === "next") {
+      // AND-join: every "next" predecessor must have completed.
+      if (preds.every((p) => latestStepState.get(p.from) === triggerState)) {
+        return true;
+      }
+    } else {
+      // OR-branch: any predecessor reaching this state opens the path.
+      if (preds.some((p) => latestStepState.get(p.from) === triggerState)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function latestStateByStep(stepRuns: any[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const run of stepRuns) {
+    // stepRuns is ordered oldest-first by loadStepRuns, so the last
+    // write per step_id wins.
+    map.set(run.step_id, run.state);
+  }
+  return map;
+}
+
+// ------------------------------------------------------------
+// Loaders
+// ------------------------------------------------------------
+
+async function loadRun(runId: string) {
+  const { data } = await supabase.from("workflow_runs").select("*").eq("id", runId).single();
+  return data ?? null;
+}
 
 async function loadVersion(versionId: string) {
   const { data } = await supabase
@@ -84,6 +183,29 @@ async function loadVersion(versionId: string) {
     .eq("id", versionId)
     .single();
   return data ?? null;
+}
+
+async function loadJobs(runId: string) {
+  const { data } = await supabase.from("workflow_jobs").select("id, step_id").eq("run_id", runId);
+  return data ?? [];
+}
+
+async function loadStepRuns(runId: string) {
+  const { data } = await supabase
+    .from("workflow_step_runs")
+    .select("step_id, state, created_at")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: true });
+  return data ?? [];
+}
+
+async function hasActiveJobs(runId: string) {
+  const { count } = await supabase
+    .from("workflow_jobs")
+    .select("id", { count: "exact", head: true })
+    .eq("run_id", runId)
+    .in("state", ["pending", "running", "retrying"]);
+  return (count ?? 0) > 0;
 }
 
 // ------------------------------------------------------------
@@ -97,11 +219,11 @@ function jsonOK(obj: any) {
   });
 }
 
-function jsonError(code: string, status = 500, err?: any) {
+function jsonError(code: string, status = 500, details?: any) {
   return new Response(
     JSON.stringify({
       error: code,
-      details: err ? String(err) : undefined,
+      details,
     }),
     {
       status,

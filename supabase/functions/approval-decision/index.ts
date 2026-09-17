@@ -1,23 +1,26 @@
-// supabase/functions/dead-letter/index.ts
-// Valtaris Glue — Dead Letter Queue Handler (Generation 3)
+// supabase/functions/approval-decision/index.ts
+// Valtaris Glue — Human Approval Decision Handler (Generation 3)
 //
 // This file is responsible for:
-//   - marking jobs as dead_letter
-//   - recording workflow_dead_letter entries
-//   - recording workflow_incidents
-//   - recording workflow_step_runs (failed)
-//   - emitting workflow_events
-//   - preserving version-pinned execution semantics
+//   - recording an operator's approve/reject decision on a pending
+//     workflow_approvals row
+//   - resuming the DAG via step-lifecycle's existing "approve"/"reject"
+//     actions
 //
 // Authority chain:
-//   run-worker → job-lifecycle → dead-letter
+//   (operator action) → approval-decision → step-lifecycle → schedule-next-job
 //
 // This file NEVER:
-//   - mutates workflow_versions
-//   - mutates workflow_runs directly
-//   - bypasses RLS
 //   - executes connectors
-//   - retries jobs
+//   - creates jobs directly
+//   - mutates workflow_versions
+//   - bypasses RLS
+//   - decides on its own -- only ever records a real operator's choice
+//
+// Restored 2026-09-17: this file's deployed bytes were previously an
+// exact copy of dead-letter's source (confirmed via md5sum), so no
+// code path anywhere actually wrote to workflow_approvals -- an
+// "approval" step's graph node had no way to ever actually resume.
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -30,94 +33,82 @@ const supabase = createClient(
 serve(async (req) => {
   try {
     const body = await req.json();
-    const { job_id, error } = body;
+    const { approval_id, operator_uid, decision, reason } = body;
 
-    if (!job_id) {
-      return jsonError("missing-job-id", 400);
+    if (!approval_id || !operator_uid || !decision) {
+      return jsonError("missing-fields", 400);
+    }
+    if (decision !== "approve" && decision !== "reject") {
+      return jsonError("invalid-decision", 400);
     }
 
-    const job = await loadJob(job_id);
-    if (!job) {
-      return jsonError("job-not-found", 404);
+    const approval = await loadApproval(approval_id);
+    if (!approval) return jsonError("approval-not-found", 404);
+
+    if (approval.state !== "pending") {
+      return jsonError("approval-not-pending", 400, { state: approval.state });
+    }
+    if (approval.expires_at && new Date(approval.expires_at).getTime() < Date.now()) {
+      await supabase
+        .from("workflow_approvals")
+        .update({ state: "expired" })
+        .eq("id", approval_id);
+      return jsonError("approval-expired", 400);
     }
 
-    await markDeadLetter(job, error ?? "dead-letter");
+    const newState = decision === "approve" ? "approved" : "rejected";
+
+    const { error: updateErr } = await supabase
+      .from("workflow_approvals")
+      .update({
+        state: newState,
+        decision,
+        decided_by: operator_uid,
+        decided_at: new Date(),
+        reason: reason ?? approval.reason ?? null,
+      })
+      .eq("id", approval_id)
+      .eq("state", "pending"); // idempotency guard
+
+    if (updateErr) {
+      console.error("approval-decision update error:", updateErr);
+      return jsonError("approval-update-failed", 500, updateErr);
+    }
+
+    const step_id = approval.step_id ?? approval.dag_node_id;
+
+    await supabase.functions.invoke("step-lifecycle", {
+      body: {
+        run_id: approval.run_id,
+        step_id,
+        action: decision === "approve" ? "approve" : "reject",
+      },
+    });
 
     return jsonOK({
-      status: "dead_letter",
-      job_id,
-      run_id: job.run_id,
-      step_id: job.step_id,
+      status: "approval-decided",
+      approval_id,
+      run_id: approval.run_id,
+      step_id,
+      decision,
     });
   } catch (err) {
-    console.error("dead-letter fatal error:", err);
-    return jsonError("dead-letter-failed", 500, err);
+    console.error("approval-decision fatal error:", err);
+    return jsonError("approval-decision-failed", 500, err);
   }
 });
 
 // ------------------------------------------------------------
-// Load Job
+// Load Approval
 // ------------------------------------------------------------
 
-async function loadJob(jobId: string) {
+async function loadApproval(approvalId: string) {
   const { data } = await supabase
-    .from("workflow_jobs")
+    .from("workflow_approvals")
     .select("*")
-    .eq("id", jobId)
+    .eq("id", approvalId)
     .single();
   return data ?? null;
-}
-
-// ------------------------------------------------------------
-// Mark Dead Letter
-// ------------------------------------------------------------
-
-async function markDeadLetter(job: any, reason: string) {
-  // 1. Mark job as dead_letter
-  await supabase
-    .from("workflow_jobs")
-    .update({
-      state: "dead_letter",
-      completed_at: new Date(),
-    })
-    .eq("id", job.id);
-
-  // 2. Record step run
-  await supabase.from("workflow_step_runs").insert({
-    run_id: job.run_id,
-    step_id: job.step_id,
-    job_id: job.id,
-    state: "failed",
-    error: reason,
-    created_at: new Date(),
-  });
-
-  // 3. Record DLQ entry
-  await supabase.from("workflow_dead_letter").insert({
-    run_id: job.run_id,
-    step_id: job.step_id,
-    job_id: job.id,
-    error: reason,
-    created_at: new Date(),
-  });
-
-  // 4. Record incident
-  await supabase.from("workflow_incidents").insert({
-    run_id: job.run_id,
-    step_id: job.step_id,
-    type: "dead_letter",
-    error: reason,
-    created_at: new Date(),
-  });
-
-  // 5. Emit workflow event
-  await supabase.from("workflow_events").insert({
-    run_id: job.run_id,
-    step_id: job.step_id,
-    type: "step.dead_letter",
-    error: reason,
-    created_at: new Date(),
-  });
 }
 
 // ------------------------------------------------------------
@@ -131,11 +122,11 @@ function jsonOK(obj: any) {
   });
 }
 
-function jsonError(code: string, status = 500, err?: any) {
+function jsonError(code: string, status = 500, details?: any) {
   return new Response(
     JSON.stringify({
       error: code,
-      details: err ? String(err) : undefined,
+      details,
     }),
     {
       status,
