@@ -126,6 +126,11 @@ Deno.serve(async (req) => {
         return j({ ok: true });
       }
       case "replay_dead_letter": {
+        // Fixed 2026-09-17: this update previously targeted
+        // retry_attempt/backoff_until/scheduled_at, none of which exist
+        // on workflow_jobs (confirmed via information_schema.columns) --
+        // every real replay attempt was failing. The real retry model
+        // (see sweep_stale_jobs) is state/retry_count/lease_expires_at.
         const { job_id } = body;
         if (!job_id) return j({ error: "job_id required" }, 400);
         const { data: job } = await sb.from("workflow_jobs").select("*").eq("id", job_id).single();
@@ -149,9 +154,9 @@ Deno.serve(async (req) => {
         }
 
         await sb.from("workflow_jobs").update({
-          state: "queued", retry_attempt: 0, error: null,
-          backoff_until: null, scheduled_at: new Date().toISOString(),
-          worker_id: null, started_at: null, completed_at: null,
+          state: "pending", retry_count: 0, error: null,
+          claimed_by: null, worker_id: null, claimed_at: null,
+          lease_expires_at: null, started_at: null, completed_at: null,
           updated_at: new Date().toISOString(),
         }).eq("id", job_id);
         await sb.from("runtime_audit_log").insert({

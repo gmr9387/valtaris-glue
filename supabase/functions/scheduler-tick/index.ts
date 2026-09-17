@@ -1,31 +1,42 @@
 // supabase/functions/scheduler-tick/index.ts
-// Valtaris Glue — Scheduler Tick Engine
+// Valtaris Glue — Scheduled Workflow Trigger (Generation 3)
 //
 // This Edge Function is responsible for:
-// - Scanning scheduled workflow definitions
-// - Determining which workflows should run now
-// - Creating workflow runs for due schedules
-// - Seeding initial jobs
-// - Emitting scheduler events
+// - Scanning workflow_schedules for schedules due to fire
+// - Enqueuing a real workflow run via the shared trigger-ingress path
+//   (the same enqueueFromTrigger() that webhook-ingress, manual-launch,
+//   event-trigger-router, and load-harness all use)
+// - Advancing next_run_at and tracking consecutive_failures
 //
-// This function is typically invoked every minute by a cron trigger.
+// Invoked on a timer (cron/external scheduler), or manually via the
+// Activation admin panel's "tick now" action (src/store/useActivation.ts
+// calls this function directly as `tickScheduler()`).
+//
+// Rewritten 2026-09-17: this file previously created workflow_runs
+// directly against a workflow_definition_id/status/current_step_id shape
+// that doesn't exist on the live schema (confirmed via
+// information_schema.columns) -- every due schedule silently failed to
+// ever enqueue a run. The workflow_schedules columns this file now
+// reads/writes match src/store/useActivation.ts's WorkflowSchedule
+// interface exactly -- the real, live contract, confirmed by reading the
+// admin UI that already depends on it.
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.0";
+import { enqueueFromTrigger } from "../_shared/triggers.ts";
 
-interface ScheduledWorkflow {
+interface WorkflowSchedule {
   id: string;
-  workflow_definition_id: string;
-  cron: string;
+  name: string;
+  dag_id: string;
+  schedule_kind: string;
+  interval_seconds: number | null;
+  cron_expression: string | null;
+  state: string;
+  next_run_at: string | null;
   last_run_at: string | null;
-}
-
-interface WorkflowDefinition {
-  id: string;
-  steps: Array<{
-    id: string;
-    connectorKey: string;
-  }>;
+  consecutive_failures: number;
+  tenant_id: string;
 }
 
 function getSupabase() {
@@ -39,174 +50,62 @@ function getSupabase() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-function shouldRun(cron: string, lastRunAt: string | null): boolean {
-  // Minimal cron evaluator: run every minute
-  // You can replace this with a full cron parser later.
-  if (!lastRunAt) return true;
-
-  const last = new Date(lastRunAt);
-  const now = new Date();
-
-  const diffMs = now.getTime() - last.getTime();
-  return diffMs >= 60_000; // 1 minute
+function computeNextRunAt(schedule: WorkflowSchedule): string {
+  // Minimal scheduler: interval-based schedules advance by
+  // interval_seconds; cron-based schedules fall back to a 1-minute tick
+  // until a full cron parser is added (same placeholder scope the
+  // original version of this file already had).
+  const seconds = schedule.schedule_kind === "interval" ? (schedule.interval_seconds ?? 60) : 60;
+  return new Date(Date.now() + seconds * 1000).toISOString();
 }
 
-async function loadScheduledWorkflows(
+async function loadDueSchedules(
   supabase: ReturnType<typeof getSupabase>,
-): Promise<ScheduledWorkflow[]> {
+): Promise<WorkflowSchedule[]> {
   const { data, error } = await supabase
     .from("workflow_schedules")
-    .select("*");
+    .select("*")
+    .eq("state", "active")
+    .lte("next_run_at", new Date().toISOString());
 
   if (error) {
-    console.error("Error loading scheduled workflows:", error);
+    console.error("Error loading due schedules:", error);
     return [];
   }
 
-  return data ?? [];
-}
-
-async function loadWorkflowDefinition(
-  supabase: ReturnType<typeof getSupabase>,
-  definitionId: string,
-): Promise<WorkflowDefinition | null> {
-  const { data, error } = await supabase
-    .from("workflow_definitions")
-    .select("*")
-    .eq("id", definitionId)
-    .single();
-
-  if (error) {
-    console.error("Error loading workflow definition:", error);
-    return null;
-  }
-
-  return data as WorkflowDefinition;
-}
-
-async function createWorkflowRun(
-  supabase: ReturnType<typeof getSupabase>,
-  definition: WorkflowDefinition,
-): Promise<string | null> {
-  const { data, error } = await supabase
-    .from("workflow_runs")
-    .insert({
-      workflow_definition_id: definition.id,
-      status: "pending",
-      current_step_id: definition.steps[0]?.id ?? null,
-    })
-    .select("id")
-    .single();
-
-  if (error) {
-    console.error("Error creating workflow run:", error);
-    return null;
-  }
-
-  return data.id;
-}
-
-async function enqueueInitialJob(
-  supabase: ReturnType<typeof getSupabase>,
-  workflowRunId: string,
-  step: WorkflowDefinition["steps"][number],
-): Promise<boolean> {
-  const now = new Date().toISOString();
-
-  const { error } = await supabase.from("workflow_jobs").insert({
-    workflow_run_id: workflowRunId,
-    step_id: step.id,
-    status: "queued",
-    attempts: 0,
-    max_attempts: 5,
-    next_run_at: now,
-    connector_key: step.connectorKey,
-    payload: {},
-  });
-
-  if (error) {
-    console.error("Error enqueuing initial job:", error);
-    return false;
-  }
-
-  return true;
-}
-
-async function updateLastRun(
-  supabase: ReturnType<typeof getSupabase>,
-  scheduleId: string,
-) {
-  const now = new Date().toISOString();
-
-  const { error } = await supabase
-    .from("workflow_schedules")
-    .update({ last_run_at: now })
-    .eq("id", scheduleId);
-
-  if (error) {
-    console.error("Error updating last_run_at:", error);
-  }
-}
-
-async function emitSchedulerEvent(
-  supabase: ReturnType<typeof getSupabase>,
-  workflowRunId: string,
-  scheduleId: string,
-) {
-  const { error } = await supabase.from("workflow_events").insert({
-    workflow_run_id: workflowRunId,
-    workflow_job_id: null,
-    step_id: null,
-    kind: "scheduler_triggered",
-    payload: {
-      scheduleId,
-      triggeredAt: new Date().toISOString(),
-    },
-  });
-
-  if (error) {
-    console.error("Error emitting scheduler event:", error);
-  }
+  return (data ?? []) as WorkflowSchedule[];
 }
 
 serve(async () => {
   const supabase = getSupabase();
+  const due = await loadDueSchedules(supabase);
 
-  const schedules = await loadScheduledWorkflows(supabase);
+  const triggered: Array<{ scheduleId: string; runId?: string; error?: string }> = [];
 
-  const triggered: Array<{ scheduleId: string; workflowRunId: string }> = [];
+  for (const schedule of due) {
+    const result = await enqueueFromTrigger(supabase, {
+      tenant_id: schedule.tenant_id,
+      dag_id: schedule.dag_id,
+      payload: {},
+      workflow_name: schedule.name,
+      trigger_kind: "schedule",
+      source_label: `schedule:${schedule.name}`,
+    });
 
-  for (const schedule of schedules) {
-    if (!shouldRun(schedule.cron, schedule.last_run_at)) {
-      continue;
-    }
+    await supabase
+      .from("workflow_schedules")
+      .update({
+        last_run_at: new Date().toISOString(),
+        next_run_at: computeNextRunAt(schedule),
+        consecutive_failures: result.ok ? 0 : schedule.consecutive_failures + 1,
+      })
+      .eq("id", schedule.id);
 
-    const definition = await loadWorkflowDefinition(
-      supabase,
-      schedule.workflow_definition_id,
+    triggered.push(
+      result.ok
+        ? { scheduleId: schedule.id, runId: result.run_id }
+        : { scheduleId: schedule.id, error: result.error ?? result.suppressed_reason },
     );
-
-    if (!definition || !definition.steps || definition.steps.length === 0) {
-      console.error("Invalid workflow definition for schedule:", schedule.id);
-      continue;
-    }
-
-    const workflowRunId = await createWorkflowRun(supabase, definition);
-    if (!workflowRunId) continue;
-
-    const firstStep = definition.steps[0];
-    const enqueued = await enqueueInitialJob(
-      supabase,
-      workflowRunId,
-      firstStep,
-    );
-
-    if (!enqueued) continue;
-
-    await updateLastRun(supabase, schedule.id);
-    await emitSchedulerEvent(supabase, workflowRunId, schedule.id);
-
-    triggered.push({ scheduleId: schedule.id, workflowRunId });
   }
 
   return new Response(

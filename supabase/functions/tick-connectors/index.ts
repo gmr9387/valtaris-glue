@@ -1,31 +1,43 @@
 // supabase/functions/tick-connectors/index.ts
-// Valtaris Glue — Connector Tick Engine
+// Valtaris Glue — Connector Poll Trigger (Generation 3)
 //
 // This Edge Function is responsible for:
-// - Polling connectors that require periodic checks
-// - Triggering workflows based on connector signals
-// - Emitting connector tick events
-// - Creating workflow runs when connectors produce actionable data
+// - Scanning connector_schedules for connectors due to be polled
+// - Executing the poll via connector-runner
+// - Enqueuing a real workflow run (via the shared trigger-ingress path,
+//   the same enqueueFromTrigger() webhook-ingress/manual-launch/
+//   event-trigger-router/load-harness all use) when the poll produces
+//   actionable output
+// - Advancing next_tick_at and tracking consecutive_failures
 //
-// This function is typically invoked every minute by a cron trigger.
+// Rewritten 2026-09-17: this file previously created workflow_runs
+// directly against a workflow_definition_id/status/current_step_id shape
+// that doesn't exist on the live schema -- every due connector schedule
+// silently failed to ever enqueue a run, even when the poll itself
+// succeeded. The connector-runner call itself was already schema-correct
+// and is unchanged.
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.0";
+import { enqueueFromTrigger } from "../_shared/triggers.ts";
 
 interface ConnectorSchedule {
   id: string;
   connector_key: string;
-  workflow_definition_id: string;
-  last_tick_at: string | null;
+  dag_id: string | null;
+  state: string;
   interval_seconds: number;
+  next_tick_at: string | null;
+  last_tick_at: string | null;
+  consecutive_failures: number;
+  tenant_id: string;
 }
 
-interface WorkflowDefinition {
-  id: string;
-  steps: Array<{
-    id: string;
-    connectorKey: string;
-  }>;
+interface ConnectorPollResult {
+  success: boolean;
+  output?: Record<string, unknown>;
+  errorCode?: string;
+  errorMessage?: string;
 }
 
 function getSupabase() {
@@ -39,50 +51,24 @@ function getSupabase() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-function shouldTick(lastTickAt: string | null, intervalSeconds: number): boolean {
-  if (!lastTickAt) return true;
-
-  const last = new Date(lastTickAt);
-  const now = new Date();
-
-  const diffMs = now.getTime() - last.getTime();
-  return diffMs >= intervalSeconds * 1000;
-}
-
-async function loadConnectorSchedules(
+async function loadDueConnectorSchedules(
   supabase: ReturnType<typeof getSupabase>,
 ): Promise<ConnectorSchedule[]> {
   const { data, error } = await supabase
     .from("connector_schedules")
-    .select("*");
+    .select("*")
+    .eq("state", "active")
+    .lte("next_tick_at", new Date().toISOString());
 
   if (error) {
-    console.error("Error loading connector schedules:", error);
+    console.error("Error loading due connector schedules:", error);
     return [];
   }
 
-  return data ?? [];
+  return (data ?? []) as ConnectorSchedule[];
 }
 
-async function loadWorkflowDefinition(
-  supabase: ReturnType<typeof getSupabase>,
-  definitionId: string,
-): Promise<WorkflowDefinition | null> {
-  const { data, error } = await supabase
-    .from("workflow_definitions")
-    .select("*")
-    .eq("id", definitionId)
-    .single();
-
-  if (error) {
-    console.error("Error loading workflow definition:", error);
-    return null;
-  }
-
-  return data as WorkflowDefinition;
-}
-
-async function callConnector(connectorKey: string): Promise<any> {
+async function pollConnector(connectorKey: string): Promise<ConnectorPollResult> {
   try {
     const res = await fetch(
       `${Deno.env.get("SUPABASE_URL")}/functions/v1/connector-runner`,
@@ -92,10 +78,7 @@ async function callConnector(connectorKey: string): Promise<any> {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
         },
-        body: JSON.stringify({
-          connectorKey,
-          payload: {},
-        }),
+        body: JSON.stringify({ connectorKey, payload: {} }),
       },
     );
 
@@ -109,156 +92,50 @@ async function callConnector(connectorKey: string): Promise<any> {
   }
 }
 
-async function createWorkflowRun(
-  supabase: ReturnType<typeof getSupabase>,
-  definition: WorkflowDefinition,
-): Promise<string | null> {
-  const { data, error } = await supabase
-    .from("workflow_runs")
-    .insert({
-      workflow_definition_id: definition.id,
-      status: "pending",
-      current_step_id: definition.steps[0]?.id ?? null,
-    })
-    .select("id")
-    .single();
-
-  if (error) {
-    console.error("Error creating workflow run:", error);
-    return null;
-  }
-
-  return data.id;
-}
-
-async function enqueueInitialJob(
-  supabase: ReturnType<typeof getSupabase>,
-  workflowRunId: string,
-  step: WorkflowDefinition["steps"][number],
-  payload: Record<string, unknown>,
-): Promise<boolean> {
-  const now = new Date().toISOString();
-
-  const { error } = await supabase.from("workflow_jobs").insert({
-    workflow_run_id: workflowRunId,
-    step_id: step.id,
-    status: "queued",
-    attempts: 0,
-    max_attempts: 5,
-    next_run_at: now,
-    connector_key: step.connectorKey,
-    payload,
-  });
-
-  if (error) {
-    console.error("Error enqueuing initial job:", error);
-    return false;
-  }
-
-  return true;
-}
-
-async function updateLastTick(
-  supabase: ReturnType<typeof getSupabase>,
-  scheduleId: string,
-) {
-  const now = new Date().toISOString();
-
-  const { error } = await supabase
-    .from("connector_schedules")
-    .update({ last_tick_at: now })
-    .eq("id", scheduleId);
-
-  if (error) {
-    console.error("Error updating last_tick_at:", error);
-  }
-}
-
-async function emitConnectorEvent(
-  supabase: ReturnType<typeof getSupabase>,
-  workflowRunId: string | null,
-  scheduleId: string,
-  connectorKey: string,
-  payload: Record<string, unknown>,
-) {
-  const { error } = await supabase.from("workflow_events").insert({
-    workflow_run_id: workflowRunId,
-    workflow_job_id: null,
-    step_id: null,
-    kind: "connector_tick",
-    payload: {
-      scheduleId,
-      connectorKey,
-      tickedAt: new Date().toISOString(),
-      connectorPayload: payload,
-    },
-  });
-
-  if (error) {
-    console.error("Error emitting connector tick event:", error);
-  }
-}
-
 serve(async () => {
   const supabase = getSupabase();
+  const due = await loadDueConnectorSchedules(supabase);
 
-  const schedules = await loadConnectorSchedules(supabase);
+  const triggered: Array<{
+    scheduleId: string;
+    polled: boolean;
+    runId?: string;
+    error?: string;
+  }> = [];
 
-  const triggered: Array<{ scheduleId: string; workflowRunId: string | null }> = [];
+  for (const schedule of due) {
+    const pollResult = await pollConnector(schedule.connector_key);
+    let runId: string | undefined;
+    let errorMessage: string | undefined = pollResult.errorMessage;
 
-  for (const schedule of schedules) {
-    if (!shouldTick(schedule.last_tick_at, schedule.interval_seconds)) {
-      continue;
+    if (pollResult.success && schedule.dag_id) {
+      const result = await enqueueFromTrigger(supabase, {
+        tenant_id: schedule.tenant_id,
+        dag_id: schedule.dag_id,
+        payload: pollResult.output ?? {},
+        workflow_name: `connector:${schedule.connector_key}`,
+        trigger_kind: "event",
+        source_label: `connector:${schedule.connector_key}`,
+      });
+      runId = result.run_id;
+      if (!result.ok) errorMessage = result.error ?? result.suppressed_reason;
     }
 
-    const connectorResult = await callConnector(schedule.connector_key);
+    await supabase
+      .from("connector_schedules")
+      .update({
+        last_tick_at: new Date().toISOString(),
+        next_tick_at: new Date(Date.now() + schedule.interval_seconds * 1000).toISOString(),
+        consecutive_failures: pollResult.success ? 0 : schedule.consecutive_failures + 1,
+      })
+      .eq("id", schedule.id);
 
-    await updateLastTick(supabase, schedule.id);
-
-    if (!connectorResult.success) {
-      await emitConnectorEvent(
-        supabase,
-        null,
-        schedule.id,
-        schedule.connector_key,
-        connectorResult,
-      );
-      continue;
-    }
-
-    const definition = await loadWorkflowDefinition(
-      supabase,
-      schedule.workflow_definition_id,
-    );
-
-    if (!definition || !definition.steps || definition.steps.length === 0) {
-      console.error("Invalid workflow definition for connector schedule:", schedule.id);
-      continue;
-    }
-
-    const workflowRunId = await createWorkflowRun(supabase, definition);
-    if (!workflowRunId) continue;
-
-    const firstStep = definition.steps[0];
-
-    const enqueued = await enqueueInitialJob(
-      supabase,
-      workflowRunId,
-      firstStep,
-      connectorResult.output ?? {},
-    );
-
-    if (!enqueued) continue;
-
-    await emitConnectorEvent(
-      supabase,
-      workflowRunId,
-      schedule.id,
-      schedule.connector_key,
-      connectorResult.output ?? {},
-    );
-
-    triggered.push({ scheduleId: schedule.id, workflowRunId });
+    triggered.push({
+      scheduleId: schedule.id,
+      polled: !!pollResult.success,
+      runId,
+      error: errorMessage,
+    });
   }
 
   return new Response(

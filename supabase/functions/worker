@@ -1,7 +1,21 @@
 // supabase/functions/worker/index.ts
-// Valtaris Glue — Workflow Worker Runtime
+// Valtaris Glue — Workflow Worker Runtime (SUPERSEDED)
 //
-// This Edge Function is responsible for:
+// Investigated 2026-09-17: this is a complete, self-consistent alternate
+// worker implementation, but it targets a column convention
+// (workflow_run_id/status/attempts/max_attempts/next_run_at/
+// connector_key) that doesn't exist on the live Gen-3 schema -- it is
+// inert there (every query would error on unknown columns), not merely
+// incomplete. The real, live worker chain is
+// trigger-job -> run-worker -> execute-step -> connector-wrapper ->
+// adapter -> worker-finalize, which does the same job (claim, execute,
+// retry/backoff via lease_expires_at+retry_count, DLQ, incidents,
+// events, DAG progression via schedule-next-job) against the real
+// schema. Left in place, unrewritten and undeployed-from-this-repo's
+// intent, rather than deleted, since deleting a live deployed function
+// is a call for the repo owner, not this pass.
+//
+// Original responsibilities (kept for reference):
 // - Claiming queued workflow jobs
 // - Executing workflow steps
 // - Invoking connectors

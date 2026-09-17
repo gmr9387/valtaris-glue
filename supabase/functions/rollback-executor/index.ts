@@ -1,10 +1,20 @@
 // supabase/functions/rollback-executor/index.ts
-// Valtaris Glue — Rollback Executor
+// Valtaris Glue — Rollback Executor (SUPERSEDED)
 //
-// This Edge Function performs workflow rollback by executing
-// compensation logic for steps that support undo operations.
+// Investigated 2026-09-17: this targets a column convention
+// (workflow_run_id/status/output on workflow_step_runs, plus a
+// blanket "reset run to pending" model) that doesn't exist on the live
+// Gen-3 schema and also conflicts with it conceptually -- Gen-3 models
+// compensation as its own DAG nodes reached via the on_compensation
+// edge, not a linear reverse-replay of completed steps. The real, live
+// compensation chain is compensate-step (executes a compensation graph
+// node) + repair-compensation (detects/resets stuck or invalid
+// compensation steps and requeues them via schedule-next-job), backed
+// by the workflow_compensation_repair table. Left in place, unrewritten,
+// rather than deleted, since deleting a live deployed function is a
+// call for the repo owner, not this pass.
 //
-// Responsibilities:
+// Original responsibilities (kept for reference):
 // - Validate workflow run existence
 // - Identify completed steps
 // - Execute compensation handlers
