@@ -233,7 +233,9 @@ async function executeTwilio(action: string, data: Record<string, unknown>) {
 }
 
 // nucleus base URLs are not secret — only the x-api-key credential is.
-const NUCLEUS_BASE_URL = "https://bpqukcsaoporhvdtfyza.supabase.co/functions/v1";
+// Points at valtaris-nucleus-2 (qrqekucwdfyqqzomuble) -- the old nucleus
+// project (bpqukcsaoporhvdtfyza) is paused/superseded.
+const NUCLEUS_BASE_URL = "https://qrqekucwdfyqqzomuble.supabase.co/functions/v1";
 
 async function executeNucleus(action: string, data: Record<string, unknown>) {
   const key = getEnvOrThrow("NUCLEUS_API_KEY");
