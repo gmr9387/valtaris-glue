@@ -121,7 +121,11 @@ export function DAGEditor() {
 
   const handleSave = async () => { try { await save(); toast.success("Draft saved"); } catch (e: any) { toast.error(e.message); } };
   const handleValidate = async () => {
-    try { const r = await validate(); r?.ok ? toast.success("Validation passed") : toast.error(`Validation failed: ${(r?.errors ?? []).length} errors`); }
+    try {
+      const r = await validate();
+      if (r?.ok) toast.success("Validation passed");
+      else toast.error(`Validation failed: ${(r?.errors ?? []).length} errors`);
+    }
     catch (e: any) { toast.error(e.message); }
   };
   const handlePublish = async () => {
@@ -198,7 +202,7 @@ export function DAGEditor() {
                   <span className="font-mono text-[10px] uppercase opacity-70">{n.type}</span>
                   {isDraft && (
                     <button className="text-[10px] hover:text-primary"
-                      onClick={(ev) => { ev.stopPropagation(); edgeFrom === n.id ? setEdgeFrom(null) : startEdge(n.id); }}>
+                      onClick={(ev) => { ev.stopPropagation(); if (edgeFrom === n.id) setEdgeFrom(null); else startEdge(n.id); }}>
                       {edgeFrom === n.id ? "•cancel" : "→wire"}
                     </button>
                   )}

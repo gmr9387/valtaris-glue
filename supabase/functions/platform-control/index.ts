@@ -68,7 +68,7 @@ Deno.serve(async (req) => {
         }).select("id").single();
         if (ie) throw ie;
 
-        await svc.from("workflow_templates").update({ install_count: (tmpl as any).install_count + 1 ?? 1 })
+        await svc.from("workflow_templates").update({ install_count: ((tmpl as any).install_count ?? 0) + 1 })
           .eq("id", tmpl.id);
         await svc.from("runtime_audit_log").insert({
           tenant_id, actor: operator_uid, action: "template.install",

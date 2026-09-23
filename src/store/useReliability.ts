@@ -129,7 +129,7 @@ export const useReliability = create<ReliabilityState>((set, get) => ({
 
     const runs = (runsR.data ?? []) as any[];
     const runIds = runs.map((r) => r.id);
-    let steps: any[] = [];
+    const steps: any[] = [];
     if (runIds.length) {
       const chunk = 500;
       for (let i = 0; i < runIds.length; i += chunk) {

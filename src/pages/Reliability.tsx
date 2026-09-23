@@ -62,7 +62,7 @@ export default function Reliability() {
     const tenant = runs[0]?.tenant_id ?? null;
     let n = 0;
     for (const a of liveAnomalies) {
-      try { await recordAnomaly({ kind: a.kind, severity: a.severity, scope: a.scope, subject: a.subject, metric_value: null, baseline_value: null, explanation: a.explanation, evidence: a.evidence }, tenant); n++; } catch {}
+      try { await recordAnomaly({ kind: a.kind, severity: a.severity, scope: a.scope, subject: a.subject, metric_value: null, baseline_value: null, explanation: a.explanation, evidence: a.evidence }, tenant); n++; } catch { /* best-effort: skip this anomaly, keep recording the rest */ }
     }
     toast.success(`Recorded ${n} anomaly event${n === 1 ? "" : "s"}`);
   };
