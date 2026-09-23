@@ -45,6 +45,8 @@ The platform is designed around a simple principle:
 
 Valtaris Glue is an independent engineering project and research implementation. It is not represented as a commercially deployed enterprise platform, independently certified compliance system, or production-scale service.
 
+**DualPay is the flagship product of the Valtaris portfolio; Glue is supporting-cast work in the same portfolio** — a standalone demonstration of durable, governed workflow-orchestration engineering (queues, DAGs, approvals, replay, compensation) rather than a component DualPay's own automation currently runs on. Glue shares a Postgres project and identity layer with DualPay and nucleus (see Database Design below), but its workflow runtime is independent of DualPay's own durable-jobs system.
+
 ---
 
 # Why This Exists
