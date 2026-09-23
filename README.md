@@ -693,6 +693,8 @@ Organizations deploying the system in regulated environments would need to perfo
 
 PostgreSQL functions as the durable system of record for workflow definitions, execution state, jobs, checkpoints, approvals, incidents, and runtime events.
 
+Valtaris Glue's tables live in a dedicated `glue` Postgres schema inside `valtaris-nucleus-2`, a Supabase project shared with valtaris-nucleus and DualPay. Each app's data stays isolated in its own schema (`glue`, `dualpay`, and nucleus's own `public`), while all three share one `auth.users` table, making a single Supabase Auth identity the common identity layer across the whole ecosystem — this replaces what used to be a standalone, Glue-only Supabase project. RLS policies (mostly deny-by-default: RLS enabled with zero policies, so only the service role can read/write), RPC functions, and triggers were carried over unchanged during the move; the Supabase client is configured with `db.schema: 'glue'` so unqualified table references keep resolving inside Glue's own schema, and Realtime `postgres_changes` subscriptions are explicitly scoped to `schema: "glue"` as well, since Realtime scoping is independent of the client's `db.schema` config.
+
 ## Core Tables
 
 Representative runtime domains include:
@@ -823,6 +825,8 @@ VITE_SUPABASE_URL
 VITE_SUPABASE_PUBLISHABLE_KEY
 VITE_SUPABASE_PROJECT_ID
 ```
+
+These now point at the shared `valtaris-nucleus-2` project; the Supabase client additionally pins `db.schema` to `glue` so all queries resolve against Glue's own schema rather than the project's `public` schema (used by nucleus) or `dualpay` (used by DualPay).
 
 Backend integrations such as:
 
@@ -992,6 +996,7 @@ Valtaris Glue intentionally separates implemented capabilities from capabilities
 | Mock connectors | Implemented |
 | Tenant-aware authorization | Implemented |
 | PostgreSQL RLS | Implemented |
+| Shared Supabase project (`glue` schema in `valtaris-nucleus-2`, identity shared with nucleus + DualPay) | Implemented |
 | Formal load benchmarks | Pending |
 | Long-lived worker hosting | Planned |
 | Multi-region execution | Planned |
