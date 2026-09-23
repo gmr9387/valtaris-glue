@@ -48,9 +48,9 @@ export const useObservability = create<State>((set) => ({
   subscribe: () => {
     const ch = supabase
       .channel("observability_stream")
-      .on("postgres_changes", { event: "*", schema: "public", table: "sla_breaches" }, () => useObservability.getState().hydrate())
-      .on("postgres_changes", { event: "*", schema: "public", table: "worker_heartbeats" }, () => useObservability.getState().hydrate())
-      .on("postgres_changes", { event: "*", schema: "public", table: "workflow_jobs" }, () => useObservability.getState().hydrate())
+      .on("postgres_changes", { event: "*", schema: "glue", table: "sla_breaches" }, () => useObservability.getState().hydrate())
+      .on("postgres_changes", { event: "*", schema: "glue", table: "worker_heartbeats" }, () => useObservability.getState().hydrate())
+      .on("postgres_changes", { event: "*", schema: "glue", table: "workflow_jobs" }, () => useObservability.getState().hydrate())
       .subscribe();
     const iv = setInterval(() => useObservability.getState().hydrate(), 15_000);
     return () => { supabase.removeChannel(ch); clearInterval(iv); };

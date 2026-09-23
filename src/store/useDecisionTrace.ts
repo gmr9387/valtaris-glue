@@ -42,7 +42,7 @@ export const useDecisionTrace = create<DecisionTraceState>((set, get) => ({
       .channel("ai_decision_trace_stream")
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "ai_decision_trace" },
+        { event: "*", schema: "glue", table: "ai_decision_trace" },
         (payload) => {
           const row = payload.new as unknown as AiDecision;
           if (payload.eventType === "INSERT") {

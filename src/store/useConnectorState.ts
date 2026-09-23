@@ -47,7 +47,7 @@ export const useConnectorState = create<ConnectorStateStore>((set, get) => ({
       .channel("connector_state_stream")
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "connector_state" },
+        { event: "*", schema: "glue", table: "connector_state" },
         (payload) => {
           const row = payload.new as unknown as ConnectorState | undefined;
           if (!row) return;

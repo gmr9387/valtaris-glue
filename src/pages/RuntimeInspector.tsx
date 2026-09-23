@@ -80,8 +80,8 @@ export default function RuntimeInspector() {
   useEffect(() => {
     if (!selectedId) return;
     const ch = supabase.channel(`inspect_${selectedId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "workflow_step_runs", filter: `run_id=eq.${selectedId}` }, () => loadDetail(selectedId))
-      .on("postgres_changes", { event: "*", schema: "public", table: "workflow_events", filter: `run_id=eq.${selectedId}` }, () => loadDetail(selectedId))
+      .on("postgres_changes", { event: "*", schema: "glue", table: "workflow_step_runs", filter: `run_id=eq.${selectedId}` }, () => loadDetail(selectedId))
+      .on("postgres_changes", { event: "*", schema: "glue", table: "workflow_events", filter: `run_id=eq.${selectedId}` }, () => loadDetail(selectedId))
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [selectedId]);

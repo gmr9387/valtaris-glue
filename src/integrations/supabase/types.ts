@@ -12,7 +12,7 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "14.5"
   }
-  public: {
+  glue: {
     Tables: {
       ai_decision_trace: {
         Row: {
@@ -1520,19 +1520,19 @@ export type Database = {
       tenant_members: {
         Row: {
           created_at: string
-          role: Database["public"]["Enums"]["operator_role"]
+          role: Database["glue"]["Enums"]["operator_role"]
           tenant_id: string
           user_id: string
         }
         Insert: {
           created_at?: string
-          role?: Database["public"]["Enums"]["operator_role"]
+          role?: Database["glue"]["Enums"]["operator_role"]
           tenant_id: string
           user_id: string
         }
         Update: {
           created_at?: string
-          role?: Database["public"]["Enums"]["operator_role"]
+          role?: Database["glue"]["Enums"]["operator_role"]
           tenant_id?: string
           user_id?: string
         }
@@ -3042,7 +3042,7 @@ export type Database = {
       }
       has_operator_role: {
         Args: {
-          _required: Database["public"]["Enums"]["operator_role"]
+          _required: Database["glue"]["Enums"]["operator_role"]
           _tenant_id: string
           _uid: string
         }
@@ -3167,7 +3167,7 @@ export type Database = {
 
 type DatabaseWithoutInternals = Omit<Database, "__InternalSupabase">
 
-type DefaultSchema = DatabaseWithoutInternals[Extract<keyof Database, "public">]
+type DefaultSchema = DatabaseWithoutInternals[Extract<keyof Database, "glue">]
 
 export type Tables<
   DefaultSchemaTableNameOrOptions extends
@@ -3283,7 +3283,7 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
-  public: {
+  glue: {
     Enums: {
       operator_role: ["admin", "operator", "observer", "auditor"],
     },

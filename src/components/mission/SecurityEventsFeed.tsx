@@ -41,7 +41,7 @@ export function SecurityEventsFeed() {
     load();
     const ch = supabase
       .channel("security_events_stream")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "security_events" }, load)
+      .on("postgres_changes", { event: "INSERT", schema: "glue", table: "security_events" }, load)
       .subscribe();
     return () => { mounted = false; supabase.removeChannel(ch); };
   }, []);

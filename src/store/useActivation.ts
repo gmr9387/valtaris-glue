@@ -89,9 +89,9 @@ export const useActivation = create<ActivationState>((set, get) => ({
   subscribe: () => {
     const ch = supabase
       .channel("activation")
-      .on("postgres_changes", { event: "*", schema: "public", table: "webhook_deliveries" }, () => get().hydrate())
-      .on("postgres_changes", { event: "*", schema: "public", table: "trigger_activations" }, () => get().hydrate())
-      .on("postgres_changes", { event: "*", schema: "public", table: "workflow_schedules" }, () => get().hydrate())
+      .on("postgres_changes", { event: "*", schema: "glue", table: "webhook_deliveries" }, () => get().hydrate())
+      .on("postgres_changes", { event: "*", schema: "glue", table: "trigger_activations" }, () => get().hydrate())
+      .on("postgres_changes", { event: "*", schema: "glue", table: "workflow_schedules" }, () => get().hydrate())
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   },

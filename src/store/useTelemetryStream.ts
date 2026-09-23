@@ -31,7 +31,7 @@ export const useTelemetryStream = create<TelemetryStreamState>((set, get) => ({
       .channel("workflow_events_stream")
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "workflow_events" },
+        { event: "INSERT", schema: "glue", table: "workflow_events" },
         (payload) => {
           const evt = payload.new as unknown as WorkflowEvent;
           const next = [evt, ...get().events].slice(0, MAX);

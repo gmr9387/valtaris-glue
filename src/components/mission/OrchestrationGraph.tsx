@@ -73,7 +73,7 @@ export function OrchestrationGraph() {
       .channel(`step_runs_${selectedRunId}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "workflow_step_runs", filter: `run_id=eq.${selectedRunId}` },
+        { event: "*", schema: "glue", table: "workflow_step_runs", filter: `run_id=eq.${selectedRunId}` },
         () => load()
       )
       .subscribe();

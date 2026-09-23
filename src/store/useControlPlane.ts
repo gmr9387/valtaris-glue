@@ -66,8 +66,8 @@ export const useControlPlane = create<State>((set, get) => ({
   subscribe: () => {
     const ch = supabase
       .channel("control_plane_stream")
-      .on("postgres_changes", { event: "*", schema: "public", table: "worker_registry" }, () => get().hydrate())
-      .on("postgres_changes", { event: "*", schema: "public", table: "queue_partitions" }, () => get().hydrate())
+      .on("postgres_changes", { event: "*", schema: "glue", table: "worker_registry" }, () => get().hydrate())
+      .on("postgres_changes", { event: "*", schema: "glue", table: "queue_partitions" }, () => get().hydrate())
       .subscribe();
     const iv = setInterval(() => get().hydrate(), 10_000);
     return () => { supabase.removeChannel(ch); clearInterval(iv); };

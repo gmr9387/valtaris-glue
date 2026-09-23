@@ -42,7 +42,7 @@ export const useLiveRuns = create<LiveRunsState>((set, get) => ({
       .channel("workflow_runs_stream")
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "workflow_runs" },
+        { event: "*", schema: "glue", table: "workflow_runs" },
         (payload) => {
           const row = payload.new as unknown as WorkflowRun | undefined;
           if (!row) return;

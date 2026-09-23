@@ -34,7 +34,7 @@ export const useApprovals = create<State>((set, get) => ({
   subscribe: () => {
     const ch = supabase
       .channel("approvals_stream")
-      .on("postgres_changes", { event: "*", schema: "public", table: "workflow_approvals" }, () => {
+      .on("postgres_changes", { event: "*", schema: "glue", table: "workflow_approvals" }, () => {
         get().hydrate();
       })
       .subscribe();
