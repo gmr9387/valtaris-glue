@@ -867,6 +867,12 @@ Run:
 bun run lint
 ```
 
+Clean (0 errors). `@typescript-eslint/no-explicit-any` is downgraded to warn (~130 pre-existing violations, mostly in `supabase/functions/` handling untyped webhook/worker JSON payloads) — same call already made in the `dualpay` repo's eslint config, same rationale.
+
+## Continuous Integration
+
+`.github/workflows/ci.yml` runs lint/test/build via `bun` on every push and PR — this repo had no CI at all before it was added. Passing on `main`.
+
 ## Build
 
 Run:
@@ -999,6 +1005,7 @@ Valtaris Glue intentionally separates implemented capabilities from capabilities
 | Tenant-aware authorization | Implemented |
 | PostgreSQL RLS | Implemented |
 | Shared Supabase project (`glue` schema in `valtaris-nucleus-2`, identity shared with nucleus + DualPay) | Implemented |
+| CI (lint/test/build on every push and PR) | Implemented — repo had none before |
 | Formal load benchmarks | Pending |
 | Long-lived worker hosting | Planned |
 | Multi-region execution | Planned |
@@ -1122,6 +1129,14 @@ The project emphasizes:
 - observable runtime behavior;
 - recoverable failures;
 - clear separation between implemented and planned capabilities.
+
+## Recent Fixes
+
+Enabling CI for the first time surfaced and closed several real issues that had been running silently:
+
+- `platform-control`'s `install_template` action computed `install_count: X + 1 ?? 1` — operator precedence meant the `+ 1` always ran first, so a missing `install_count` produced `NaN` instead of falling back to 1 as intended (`??` never triggers on a numeric `NaN`). Fixed and redeployed to the live Edge Function.
+- A Google Fonts `@import` in `src/index.css` sat after the `@tailwind` directives, which is invalid CSS — browsers silently drop it, so the custom fonts never actually loaded. Reordered.
+- `supabase/functions/_shared/retry.ts` was a Markdown document (a heading plus a fenced code block) saved with a `.ts` extension, never imported anywhere, and failed to parse as TypeScript. Renamed to `.md`.
 
 ---
 
