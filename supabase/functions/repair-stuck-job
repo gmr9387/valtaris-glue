@@ -18,13 +18,17 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { checkStuckJob } from "./repair-stuck-job.pure.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
 );
 
-const MAX_JOB_RUNTIME_MS = 5 * 60 * 1000; // 5 minutes
+// leaseExpired/runningTooLong detection now lives in
+// repair-stuck-job.pure.ts -- extracted so this real stuck-job decision
+// logic is directly testable from Vitest without needing to shim a
+// whole Edge Function runtime.
 
 serve(async (req) => {
   const body = await req.json().catch(() => ({}));
@@ -47,15 +51,9 @@ serve(async (req) => {
 
   const job = jobData;
 
-  // 2. Check lease expiration
+  // 2/3. Check lease expiration and stuck execution (running too long)
   const now = Date.now();
-  const leaseExpired =
-    job.lease_expires_at && new Date(job.lease_expires_at).getTime() < now;
-
-  // 3. Check stuck execution (running too long)
-  const runningTooLong =
-    job.claimed_at &&
-    now - new Date(job.claimed_at).getTime() > MAX_JOB_RUNTIME_MS;
+  const { leaseExpired, runningTooLong } = checkStuckJob(job, now);
 
   if (!leaseExpired && !runningTooLong) {
     return new Response(

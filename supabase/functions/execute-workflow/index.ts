@@ -19,6 +19,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { findInitialSteps } from "../_shared/dag-roots.pure.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -41,7 +42,7 @@ serve(async (req) => {
     if (!version) return jsonError("version-not-found", 404);
 
     // Determine initial ready steps
-    const readySteps = findInitialSteps(version);
+    const readySteps = findInitialSteps(version.graph?.nodes ?? []);
 
     // Create jobs for each ready step
     for (const stepId of readySteps) {
@@ -104,49 +105,10 @@ async function loadVersion(versionId: string) {
 // Find Initial Steps (roots)
 // ------------------------------------------------------------
 //
-// A root step is any node with no predecessors.
-
-function findInitialSteps(version: any) {
-  const nodes = version.graph.nodes;
-  const roots: string[] = [];
-
-  for (const node of nodes) {
-    const id = node.id;
-    const predecessors = findPredecessors(version, id);
-
-    if (predecessors.length === 0) {
-      roots.push(id);
-    }
-  }
-
-  return roots;
-}
-
-// ------------------------------------------------------------
-// Find Predecessors
-// ------------------------------------------------------------
-
-function findPredecessors(version: any, stepId: string) {
-  const preds: string[] = [];
-
-  for (const node of version.graph.nodes) {
-    const next = node.next ?? [];
-    const onFailure = node.on_failure ?? [];
-    const onApproval = node.on_approval ?? [];
-    const onComp = node.on_compensation ?? [];
-
-    if (
-      next.includes(stepId) ||
-      onFailure.includes(stepId) ||
-      onApproval.includes(stepId) ||
-      onComp.includes(stepId)
-    ) {
-      preds.push(node.id);
-    }
-  }
-
-  return preds;
-}
+// findInitialSteps()/findPredecessors() now live in
+// _shared/dag-roots.pure.ts -- shared with enqueueFromTrigger
+// (_shared/triggers.ts) so both launch paths compute the same root set
+// for the same graph, and directly testable from Vitest.
 
 // ------------------------------------------------------------
 // Response Helpers

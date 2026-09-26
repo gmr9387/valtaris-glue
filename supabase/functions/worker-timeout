@@ -19,14 +19,17 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { isJobTimedOut, isStepTimedOut } from "./worker-timeout.pure.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
 );
 
-// Worker-side timeout (Generation‑3 standard)
-const WORKER_TIMEOUT_MS = 1000 * 60 * 10; // 10 minutes
+// isJobTimedOut()/isStepTimedOut() (and WORKER_TIMEOUT_MS) now live in
+// worker-timeout.pure.ts -- extracted so this real timeout decision
+// logic is directly testable from Vitest without needing to shim a
+// whole Edge Function runtime.
 
 const NOW = () => new Date();
 
@@ -87,43 +90,34 @@ async function loadStepRuns(runId: string) {
 // ------------------------------------------------------------
 
 async function enforceJobTimeout(job: any) {
-  if (job.state !== "running") return;
+  if (!isJobTimedOut(job, NOW().getTime())) return;
 
-  const age = NOW().getTime() - new Date(job.started_at).getTime();
+  await emitTimeoutEvent(job.run_id, job.step_id, "job.timeout");
 
-  if (age > WORKER_TIMEOUT_MS) {
-    await emitTimeoutEvent(job.run_id, job.step_id, "job.timeout");
-
-    await supabase.functions.invoke("job-lifecycle", {
-      body: {
-        job_id: job.id,
-        action: "fail",
-        error: "worker-timeout",
-      },
-    });
-  }
+  await supabase.functions.invoke("job-lifecycle", {
+    body: {
+      job_id: job.id,
+      action: "fail",
+      error: "worker-timeout",
+    },
+  });
 }
 
 async function enforceStepTimeout(job: any, steps: any[]) {
   const step = steps.find((s) => s.step_id === job.step_id);
-  if (!step) return;
 
-  if (step.state !== "running") return;
+  if (!isStepTimedOut(step, NOW().getTime())) return;
 
-  const age = NOW().getTime() - new Date(step.created_at).getTime();
+  await emitTimeoutEvent(job.run_id, job.step_id, "step.timeout");
 
-  if (age > WORKER_TIMEOUT_MS) {
-    await emitTimeoutEvent(job.run_id, job.step_id, "step.timeout");
-
-    await supabase.functions.invoke("step-lifecycle", {
-      body: {
-        run_id: job.run_id,
-        step_id: job.step_id,
-        action: "fail",
-        error: "worker-timeout",
-      },
-    });
-  }
+  await supabase.functions.invoke("step-lifecycle", {
+    body: {
+      run_id: job.run_id,
+      step_id: job.step_id,
+      action: "fail",
+      error: "worker-timeout",
+    },
+  });
 }
 
 // ------------------------------------------------------------
