@@ -20,9 +20,16 @@ Deno.serve(async (req) => {
     runs = 20,
     workflow_name = "demo.load",
     dag_id = "demo.live",
+    workflow_version_id = null,
     tenant_id = null,
     concurrency = 5,
   } = body;
+
+  if (!workflow_version_id) {
+    return new Response(JSON.stringify({ error: "workflow_version_id required" }), {
+      status: 400, headers: { ...cors, "Content-Type": "application/json" },
+    });
+  }
 
   const { data: bench } = await sb.from("load_benchmarks").insert({
     name, scenario, tenant_id,
@@ -37,7 +44,7 @@ Deno.serve(async (req) => {
   for (let i = 0; i < runs; i += concurrency) {
     const batch = Array.from({ length: Math.min(concurrency, runs - i) }, (_, k) =>
       enqueueFromTrigger(sb, {
-        workflow_name, dag_id, tenant_id,
+        workflow_name, dag_id, workflow_version_id, tenant_id,
         trigger_kind: "manual", source_label: `load:${name}`,
         payload: { _load: { name, index: i + k } },
       }).then(() => completed++).catch(() => failed++)

@@ -25,6 +25,7 @@ interface ConnectorSchedule {
   id: string;
   connector_key: string;
   dag_id: string | null;
+  workflow_version_id: string | null;
   state: string;
   interval_seconds: number;
   next_tick_at: string | null;
@@ -108,9 +109,10 @@ serve(async () => {
     let runId: string | undefined;
     let errorMessage: string | undefined = pollResult.errorMessage;
 
-    if (pollResult.success && schedule.dag_id) {
+    if (pollResult.success && schedule.workflow_version_id) {
       const result = await enqueueFromTrigger(supabase, {
         tenant_id: schedule.tenant_id,
+        workflow_version_id: schedule.workflow_version_id,
         dag_id: schedule.dag_id,
         payload: pollResult.output ?? {},
         workflow_name: `connector:${schedule.connector_key}`,

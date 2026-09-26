@@ -206,7 +206,7 @@ Deno.serve(async (req) => {
         const { enqueueFromTrigger } = await import("../_shared/triggers.ts");
         const correlation_id = crypto.randomUUID();
         const result = await enqueueFromTrigger(sb, {
-          tenant_id: del.tenant_id, dag_id: ep.dag_id,
+          tenant_id: del.tenant_id, workflow_version_id: ep.workflow_version_id, dag_id: ep.dag_id,
           payload: { event: del.body, headers: del.headers, source: ep.source, endpoint_key: ep.endpoint_key, replayed_from: del.id },
           correlation_id,
           workflow_name: `webhook-replay:${ep.endpoint_key}`,
