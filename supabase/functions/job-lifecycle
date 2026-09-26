@@ -18,6 +18,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { computeBackoffMs } from "../_shared/retry-policy.pure.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -29,7 +30,7 @@ const NOW = () => new Date();
 serve(async (req) => {
   try {
     const body = await req.json();
-    const { job_id, action, result, error } = body;
+    const { job_id, action, result, error, delay_ms } = body;
 
     if (!job_id || !action) {
       return jsonError("missing-fields", 400);
@@ -52,7 +53,7 @@ serve(async (req) => {
         break;
 
       case "delay":
-        await markDelayed(job, error);
+        await markDelayed(job, error, delay_ms);
         break;
 
       case "dead-letter":
@@ -140,19 +141,40 @@ async function markFailed(job: any, error: any) {
 }
 
 async function markRetry(job: any, error: any) {
+  const retryCount = (job.retry_count ?? 0) + 1;
+
+  // Reset straight back to 'pending' (ensure_downstream_job's own
+  // convention, same reset repair-stuck-job already does for a stuck
+  // job) so glue.dispatch_pending_jobs() picks it up again once its
+  // backoff elapses -- 'retrying' as a standalone state had nothing
+  // that ever moved a job out of it.
   await updateJob(job.id, {
-    state: "retrying",
-    retry_count: (job.retry_count ?? 0) + 1,
+    state: "pending",
+    retry_count: retryCount,
     error,
+    claimed_at: null,
+    claimed_by: null,
+    worker_id: null,
+    lease_expires_at: null,
+    started_at: null,
+    next_attempt_at: new Date(Date.now() + computeBackoffMs(retryCount)).toISOString(),
   });
 
   await emitEvent(job.run_id, job.step_id, "job.retrying");
 }
 
-async function markDelayed(job: any, error: any) {
+async function markDelayed(job: any, error: any, delayMs?: number) {
+  const ms = typeof delayMs === "number" && delayMs > 0 ? delayMs : 5 * 60_000;
+
   await updateJob(job.id, {
-    state: "delayed",
+    state: "pending",
     error,
+    claimed_at: null,
+    claimed_by: null,
+    worker_id: null,
+    lease_expires_at: null,
+    started_at: null,
+    next_attempt_at: new Date(Date.now() + ms).toISOString(),
   });
 
   await emitEvent(job.run_id, job.step_id, "job.delayed");
