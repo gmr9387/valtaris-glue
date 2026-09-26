@@ -27,10 +27,17 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { isReady, latestStateByStep } from "./schedule-next-job.pure.ts";
 
+// FIXED: this local copy was missing { db: { schema: "glue" } } --
+// present on the actually-deployed version (confirmed via
+// get_edge_function), which is why production was never affected, but
+// the repo's own source didn't match what's live. Added to keep them
+// in sync.
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  { db: { schema: "glue" } }
 );
 
 serve(async (req) => {
@@ -108,64 +115,10 @@ serve(async (req) => {
 // other edge types are OR-branches -- any one predecessor reaching
 // that state is enough to take that path.
 
-const EDGE_TRIGGER_STATE: Record<string, string> = {
-  next: "completed",
-  on_failure: "failed",
-  on_approval: "approved",
-  on_compensation: "compensated",
-};
-
-function isReady(
-  node: any,
-  allNodes: any[],
-  latestStepState: Map<string, string>
-): boolean {
-  const incoming: { from: string; edge: keyof typeof EDGE_TRIGGER_STATE }[] = [];
-
-  for (const candidate of allNodes) {
-    for (const edge of ["next", "on_failure", "on_approval", "on_compensation"] as const) {
-      const list = candidate[edge] ?? [];
-      if (Array.isArray(list) && list.includes(node.id)) {
-        incoming.push({ from: candidate.id, edge });
-      }
-    }
-  }
-
-  if (incoming.length === 0) return false; // root nodes are seeded by execute-workflow
-
-  const byEdge = new Map<string, { from: string; edge: string }[]>();
-  for (const inc of incoming) {
-    if (!byEdge.has(inc.edge)) byEdge.set(inc.edge, []);
-    byEdge.get(inc.edge)!.push(inc);
-  }
-
-  for (const [edge, preds] of byEdge) {
-    const triggerState = EDGE_TRIGGER_STATE[edge];
-    if (edge === "next") {
-      // AND-join: every "next" predecessor must have completed.
-      if (preds.every((p) => latestStepState.get(p.from) === triggerState)) {
-        return true;
-      }
-    } else {
-      // OR-branch: any predecessor reaching this state opens the path.
-      if (preds.some((p) => latestStepState.get(p.from) === triggerState)) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-function latestStateByStep(stepRuns: any[]): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const run of stepRuns) {
-    // stepRuns is ordered oldest-first by loadStepRuns, so the last
-    // write per step_id wins.
-    map.set(run.step_id, run.state);
-  }
-  return map;
-}
+// isReady()/latestStateByStep() now live in schedule-next-job.pure.ts
+// -- extracted so this real DAG-readiness decision logic is directly
+// testable from Vitest without needing to shim a whole Edge Function
+// runtime.
 
 // ------------------------------------------------------------
 // Loaders
