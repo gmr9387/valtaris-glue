@@ -19,8 +19,10 @@ Deno.serve(async (req) => {
   const operator_uid = auth.ctx.userId;
 
   const body = await req.json().catch(() => ({}));
-  const { tenant_id, dag_id, parameters, reason } = body ?? {};
-  if (!tenant_id || !dag_id) return j({ error: "tenant_id and dag_id required" }, 400);
+  const { tenant_id, dag_id, workflow_version_id, parameters, reason } = body ?? {};
+  if (!tenant_id || !dag_id || !workflow_version_id) {
+    return j({ error: "tenant_id, dag_id, and workflow_version_id required" }, 400);
+  }
 
   const sb = serviceClient();
 
@@ -37,6 +39,7 @@ Deno.serve(async (req) => {
 
   const result = await enqueueFromTrigger(sb, {
     tenant_id,
+    workflow_version_id,
     dag_id,
     payload: parameters ?? {},
     workflow_name: `manual:${dag_id}`,

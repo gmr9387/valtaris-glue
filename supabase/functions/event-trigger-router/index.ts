@@ -66,6 +66,7 @@ Deno.serve(async (req) => {
 
     const result = await enqueueFromTrigger(sb, {
       tenant_id,
+      workflow_version_id: t.workflow_version_id as string,
       dag_id: t.dag_id as string,
       payload: { event_type, event: payload ?? {} },
       workflow_name: `event:${event_type}:${t.name}`,

@@ -29,6 +29,7 @@ interface WorkflowSchedule {
   id: string;
   name: string;
   dag_id: string;
+  workflow_version_id: string | null;
   schedule_kind: string;
   interval_seconds: number | null;
   cron_expression: string | null;
@@ -85,6 +86,7 @@ serve(async () => {
   for (const schedule of due) {
     const result = await enqueueFromTrigger(supabase, {
       tenant_id: schedule.tenant_id,
+      workflow_version_id: schedule.workflow_version_id as string,
       dag_id: schedule.dag_id,
       payload: {},
       workflow_name: schedule.name,
