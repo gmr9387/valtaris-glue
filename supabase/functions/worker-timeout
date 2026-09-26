@@ -20,6 +20,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { isJobTimedOut, isStepTimedOut } from "./worker-timeout.pure.ts";
+import { decideFailureAction } from "../_shared/retry-policy.pure.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -47,11 +48,15 @@ serve(async (req) => {
 
     const steps = await loadStepRuns(job.run_id);
 
-    // Check job timeout
-    await enforceJobTimeout(job);
+    // Check job timeout -- decide once so the step check below doesn't
+    // terminally fail a step whose job is merely being retried.
+    const jobDecision = isJobTimedOut(job, NOW().getTime()) ? decideFailureAction(job) : null;
+    if (jobDecision) {
+      await enforceJobTimeout(job, jobDecision);
+    }
 
     // Check step timeout
-    await enforceStepTimeout(job, steps);
+    await enforceStepTimeout(job, steps, jobDecision);
 
     return jsonOK({
       status: "worker-timeout-check-complete",
@@ -89,24 +94,26 @@ async function loadStepRuns(runId: string) {
 // Enforcement Logic
 // ------------------------------------------------------------
 
-async function enforceJobTimeout(job: any) {
-  if (!isJobTimedOut(job, NOW().getTime())) return;
-
+async function enforceJobTimeout(job: any, decision: "retry" | "fail") {
   await emitTimeoutEvent(job.run_id, job.step_id, "job.timeout");
 
   await supabase.functions.invoke("job-lifecycle", {
     body: {
       job_id: job.id,
-      action: "fail",
+      action: decision,
       error: "worker-timeout",
     },
   });
 }
 
-async function enforceStepTimeout(job: any, steps: any[]) {
+async function enforceStepTimeout(job: any, steps: any[], jobDecision: "retry" | "fail" | null) {
   const step = steps.find((s) => s.step_id === job.step_id);
 
   if (!isStepTimedOut(step, NOW().getTime())) return;
+  // The job is being retried, not terminally failed -- don't fail the
+  // step-run out from under it (schedule-next-job's on_failure edges
+  // would fire prematurely otherwise).
+  if (jobDecision === "retry") return;
 
   await emitTimeoutEvent(job.run_id, job.step_id, "step.timeout");
 

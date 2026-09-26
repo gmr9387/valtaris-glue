@@ -19,6 +19,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { decideFailureAction } from "../_shared/retry-policy.pure.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -61,10 +62,12 @@ serve(async (req) => {
         },
       });
     } else if (status === "failed") {
+      // Retry while budget remains (retry_count < max_retries); only
+      // fail terminally once it's exhausted.
       await supabase.functions.invoke("job-lifecycle", {
         body: {
           job_id,
-          action: "fail",
+          action: decideFailureAction(job),
           error,
         },
       });
