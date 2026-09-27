@@ -206,7 +206,7 @@ Deno.serve(async (req) => {
         const { enqueueFromTrigger } = await import("../_shared/triggers.ts");
         const correlation_id = crypto.randomUUID();
         const result = await enqueueFromTrigger(sb, {
-          tenant_id: del.tenant_id, dag_id: ep.dag_id,
+          tenant_id: del.tenant_id, workflow_version_id: ep.workflow_version_id, dag_id: ep.dag_id,
           payload: { event: del.body, headers: del.headers, source: ep.source, endpoint_key: ep.endpoint_key, replayed_from: del.id },
           correlation_id,
           workflow_name: `webhook-replay:${ep.endpoint_key}`,
@@ -224,6 +224,123 @@ Deno.serve(async (req) => {
           details: { run_id: result.run_id },
         });
         return j({ ok: true, run_id: result.run_id });
+      }
+
+      case "list_workflow_versions": {
+        // workflow_versions has zero RLS policies (service-role-only by
+        // design), so the picker UI reads it through here rather than
+        // directly from the client.
+        if (!body.tenant_id) return j({ error: "tenant_id required" }, 400);
+        const { data: allowed } = await sb.rpc("has_operator_role", {
+          _uid: operator_uid, _tenant_id: body.tenant_id, _required: "operator",
+        });
+        if (!allowed) return j({ error: "operator role required" }, 403);
+        const { data, error } = await sb.from("workflow_versions")
+          .select("id, state, metadata, created_at")
+          .eq("tenant_id", body.tenant_id)
+          .order("created_at", { ascending: false })
+          .limit(100);
+        if (error) return j({ error: error.message }, 500);
+        return j({ ok: true, versions: data ?? [] });
+      }
+
+      case "list_event_triggers": {
+        // runtime_triggers has zero RLS policies at all (not even
+        // SELECT), so it's read through here rather than directly.
+        if (!body.tenant_id) return j({ error: "tenant_id required" }, 400);
+        const { data: allowed } = await sb.rpc("has_operator_role", {
+          _uid: operator_uid, _tenant_id: body.tenant_id, _required: "operator",
+        });
+        if (!allowed) return j({ error: "operator role required" }, 403);
+        const { data, error } = await sb.from("runtime_triggers")
+          .select("*")
+          .eq("tenant_id", body.tenant_id)
+          .order("created_at", { ascending: false })
+          .limit(100);
+        if (error) return j({ error: error.message }, 500);
+        return j({ ok: true, triggers: data ?? [] });
+      }
+
+      case "create_webhook_endpoint": {
+        const { tenant_id, endpoint_key, source, workflow_version_id, dag_id, signing_secret } = body;
+        if (!tenant_id || !endpoint_key || !workflow_version_id) {
+          return j({ error: "tenant_id, endpoint_key, and workflow_version_id required" }, 400);
+        }
+        const { data: allowed } = await sb.rpc("has_operator_role", {
+          _uid: operator_uid, _tenant_id: tenant_id, _required: "operator",
+        });
+        if (!allowed) return j({ error: "operator role required" }, 403);
+        const { data: version } = await sb.from("workflow_versions")
+          .select("id").eq("id", workflow_version_id).eq("tenant_id", tenant_id).maybeSingle();
+        if (!version) return j({ error: "workflow_version not found for this tenant" }, 400);
+        const { data: row, error } = await sb.from("webhook_endpoints").insert({
+          tenant_id, endpoint_key, source: source || "webhook",
+          workflow_version_id, dag_id: dag_id || endpoint_key,
+          signing_secret: signing_secret || null,
+        }).select().single();
+        if (error) return j({ error: error.message }, 500);
+        await logSecurity({
+          tenant_id, actor_user_id: operator_uid, category: "operator.action",
+          subject_type: "webhook_endpoint", subject_id: row.id, message: "webhook endpoint created",
+        });
+        return j({ ok: true, endpoint: row });
+      }
+
+      case "create_schedule": {
+        const { tenant_id, name, workflow_version_id, dag_id, schedule_kind, interval_seconds, cron_expression } = body;
+        if (!tenant_id || !name || !workflow_version_id) {
+          return j({ error: "tenant_id, name, and workflow_version_id required" }, 400);
+        }
+        const kind = schedule_kind === "cron" ? "cron" : "interval";
+        if (kind === "cron" && !cron_expression) {
+          return j({ error: "cron_expression required for cron schedules" }, 400);
+        }
+        const { data: allowed } = await sb.rpc("has_operator_role", {
+          _uid: operator_uid, _tenant_id: tenant_id, _required: "operator",
+        });
+        if (!allowed) return j({ error: "operator role required" }, 403);
+        const { data: version } = await sb.from("workflow_versions")
+          .select("id").eq("id", workflow_version_id).eq("tenant_id", tenant_id).maybeSingle();
+        if (!version) return j({ error: "workflow_version not found for this tenant" }, 400);
+        const { data: row, error } = await sb.from("workflow_schedules").insert({
+          tenant_id, name, workflow_version_id, dag_id: dag_id || name,
+          schedule_kind: kind,
+          interval_seconds: kind === "interval" ? (Number(interval_seconds) || 60) : null,
+          cron_expression: kind === "cron" ? cron_expression : null,
+          next_run_at: new Date().toISOString(),
+        }).select().single();
+        if (error) return j({ error: error.message }, 500);
+        await logSecurity({
+          tenant_id, actor_user_id: operator_uid, category: "operator.action",
+          subject_type: "workflow_schedule", subject_id: row.id, message: "schedule created",
+        });
+        return j({ ok: true, schedule: row });
+      }
+
+      case "create_event_trigger": {
+        const { tenant_id, name, source_event_type, workflow_version_id, dag_id, condition, cooldown_seconds, max_depth } = body;
+        if (!tenant_id || !name || !source_event_type || !workflow_version_id) {
+          return j({ error: "tenant_id, name, source_event_type, and workflow_version_id required" }, 400);
+        }
+        const { data: allowed } = await sb.rpc("has_operator_role", {
+          _uid: operator_uid, _tenant_id: tenant_id, _required: "operator",
+        });
+        if (!allowed) return j({ error: "operator role required" }, 403);
+        const { data: version } = await sb.from("workflow_versions")
+          .select("id").eq("id", workflow_version_id).eq("tenant_id", tenant_id).maybeSingle();
+        if (!version) return j({ error: "workflow_version not found for this tenant" }, 400);
+        const { data: row, error } = await sb.from("runtime_triggers").insert({
+          tenant_id, name, source_event_type, workflow_version_id, dag_id: dag_id || name,
+          condition: condition ?? {},
+          cooldown_seconds: Number(cooldown_seconds) || 0,
+          max_depth: Number(max_depth) || 5,
+        }).select().single();
+        if (error) return j({ error: error.message }, 500);
+        await logSecurity({
+          tenant_id, actor_user_id: operator_uid, category: "operator.action",
+          subject_type: "runtime_trigger", subject_id: row.id, message: "event trigger created",
+        });
+        return j({ ok: true, trigger: row });
       }
 
       default:
