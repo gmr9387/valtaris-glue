@@ -36,6 +36,7 @@ interface ConnectorError {
 | Slack | Partial | Webhook post supported; OAuth scope flows not. |
 | Twilio | Partial | SMS send supported. |
 | Salesforce | Partial | Read flows supported, write flows mocked. |
+| ServiceNow | Real | Requires `SERVICENOW_INSTANCE_URL`/`SERVICENOW_CLIENT_ID`/`SERVICENOW_CLIENT_SECRET`. Table API: createRecord/updateRecord/getRecord against any table. |
 
 ## Mock mode
 If the connector secret is missing, the adapter returns a synthesized

@@ -18,6 +18,7 @@ const SUPPORTED_ACTIONS: Record<string, string[]> = {
   twilio: ['sendMessage'],
   slack: ['postMessage', 'createChannel'],
   salesforce: ['createLead', 'updateOpportunity'],
+  servicenow: ['createRecord', 'updateRecord', 'getRecord'],
   nucleus: ['adjudicateClaim', 'scoreOpportunity', 'scoreRecommendation', 'guardianStatus'],
 };
 

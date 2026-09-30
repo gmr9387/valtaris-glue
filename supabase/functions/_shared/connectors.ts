@@ -1127,6 +1127,123 @@ const salesforce: ConnectorAdapter = {
   },
 };
 
+// ─── ServiceNow ───────────────────────────────────────────
+//
+// Generic Table API connector: createRecord / updateRecord / getRecord
+// against any ServiceNow table a workflow step targets (Case, Incident, or
+// a custom table). Deliberately table-agnostic -- unlike a purpose-built
+// point-to-point integration (see DualPay's servicenow-sync, which owns a
+// dedicated Scripted REST API and one specific record shape), Glue's job
+// is to let any workflow step configure whatever table/fields it needs.
+// OAuth client-credentials, same secret names as DualPay's integration so
+// one ServiceNow app registration can serve both.
+
+async function getServiceNowToken(
+  instanceUrl: string,
+  clientId: string,
+  clientSecret: string,
+): Promise<string> {
+  const res = await fetch(`${instanceUrl}/oauth_token.do`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: clientId,
+      client_secret: clientSecret,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`ServiceNow token endpoint returned ${res.status}`);
+  }
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error("ServiceNow token response missing access_token");
+  }
+  return data.access_token as string;
+}
+
+const servicenow: ConnectorAdapter = {
+  name: "servicenow",
+
+  hasCredentials: () =>
+    !!Deno.env.get("SERVICENOW_INSTANCE_URL") &&
+    !!Deno.env.get("SERVICENOW_CLIENT_ID") &&
+    !!Deno.env.get("SERVICENOW_CLIENT_SECRET"),
+
+  execute(action, input, opts) {
+    const instanceUrl = Deno.env.get("SERVICENOW_INSTANCE_URL");
+    const clientId = Deno.env.get("SERVICENOW_CLIENT_ID");
+    const clientSecret = Deno.env.get("SERVICENOW_CLIENT_SECRET");
+    const hasCreds = !!instanceUrl && !!clientId && !!clientSecret;
+
+    const table = String(input.table ?? "incident");
+    const sysId = input.sys_id ? String(input.sys_id) : undefined;
+
+    return runAdapter(
+      "servicenow",
+      action,
+      hasCreds,
+      async () => {
+        // Token fetch happens inside liveFn so a bad-credentials or
+        // network failure here is caught by runAdapter's existing
+        // try/catch and classified the same way as any other adapter
+        // failure -- no separate error path to maintain.
+        const token = await getServiceNowToken(instanceUrl!, clientId!, clientSecret!);
+        const headers = {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        };
+
+        if (action === "createRecord") {
+          return fetch(`${instanceUrl}/api/now/table/${table}`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(input.fields ?? {}),
+          });
+        }
+
+        if (action === "updateRecord") {
+          if (!sysId) {
+            return new Response(
+              JSON.stringify({ error: "updateRecord requires input.sys_id" }),
+              { status: 400, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return fetch(`${instanceUrl}/api/now/table/${table}/${sysId}`, {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify(input.fields ?? {}),
+          });
+        }
+
+        if (action === "getRecord") {
+          if (!sysId) {
+            return new Response(
+              JSON.stringify({ error: "getRecord requires input.sys_id" }),
+              { status: 400, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return fetch(`${instanceUrl}/api/now/table/${table}/${sysId}`, {
+            method: "GET",
+            headers,
+          });
+        }
+
+        return new Response(
+          JSON.stringify({ error: `unsupported ServiceNow action: ${action}` }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      },
+      () => ({
+        sys_id: "sn_mock_" + Date.now(),
+        number: (table === "incident" ? "INC" : "REC") + String(Date.now()).slice(-7),
+        table,
+      }),
+      opts?.timeoutMs ?? 6000,
+    );
+  },
+};
+
 // ─── Internal ─────────────────────────────────────────────
 
 const internal: ConnectorAdapter = {
@@ -1214,6 +1331,7 @@ const REGISTRY: Record<
   twilio,
   slack,
   salesforce,
+  servicenow,
   internal,
 };
 
