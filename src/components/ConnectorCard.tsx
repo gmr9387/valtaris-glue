@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { useApiStore } from '@/store/useApiStore';
-import { CheckCircle, Plug, CreditCard, Brain, Mail, MessageSquare, Hash, Cloud } from 'lucide-react';
+import { CheckCircle, Plug, CreditCard, Brain, Mail, MessageSquare, Hash, Cloud, Ticket } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
 import { StatusBadge } from '@/components/ui/status-badge';
 
@@ -19,6 +19,7 @@ const CONNECTORS: ConnectorDef[] = [
   { name: 'twilio', label: 'Twilio', icon: MessageSquare, description: 'SMS & messaging — send text messages.' },
   { name: 'slack', label: 'Slack', icon: Hash, description: 'Team chat — post messages, manage channels.' },
   { name: 'salesforce', label: 'Salesforce', icon: Cloud, description: 'CRM — manage leads, opportunities, accounts.' },
+  { name: 'servicenow', label: 'ServiceNow', icon: Ticket, description: 'ITSM — create, update, and look up Cases or Incidents.' },
 ];
 
 export function ConnectorCard({ connector }: { connector: typeof CONNECTORS[0] }) {

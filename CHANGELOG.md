@@ -62,3 +62,12 @@ phase-relative; see git history for exact timestamps.
 - `/platform`, `/quickstart`, `/docs`, `/inspector` operator pages.
 - Rebrand to **Valtaris Glue**; nav reorganized into Get Started / Build / Orchestrate / Observe.
 - `WorkflowHealthPanel`, `RuntimeInspector` forensic tooling.
+
+## Phase — ServiceNow Connector
+
+- `servicenow` connector adapter: OAuth client-credentials auth, generic
+  Table API (createRecord/updateRecord/getRecord against any table).
+- Registered in `connector_catalog`; `support_ticket_to_servicenow`
+  workflow template composing it with the `openai` connector.
+- Same `SERVICENOW_*` secret names as DualPay's own ServiceNow Case-sync
+  integration, so one ServiceNow OAuth app registration serves both.
