@@ -45,7 +45,7 @@ The platform is designed around a simple principle:
 
 Valtaris Glue is an independent engineering project and research implementation. It is not represented as a commercially deployed enterprise platform, independently certified compliance system, or production-scale service.
 
-**DualPay is the flagship product of the Valtaris portfolio; Glue is supporting-cast work in the same portfolio** — a standalone demonstration of durable, governed workflow-orchestration engineering (queues, DAGs, approvals, replay, compensation) rather than a component DualPay's own automation currently runs on. Glue shares a Postgres project and identity layer with DualPay and nucleus (see Database Design below), but its workflow runtime is independent of DualPay's own durable-jobs system.
+**DualPay is the flagship product of the Valtaris portfolio; Glue is supporting-cast work in the same portfolio** — a standalone demonstration of durable, governed workflow-orchestration engineering (queues, DAGs, approvals, replay, compensation) rather than a component DualPay's own automation currently runs on. Glue shares a Postgres project and identity layer with DualPay and nucleus (see Database Design below), but its workflow runtime is independent of DualPay's own durable-jobs system. [decision-weaver-ai](https://github.com/gmr9387/decision-weaver-ai) is a fourth repo in the same portfolio — a standalone decision-intelligence product in the same design lineage as the execution-gating concept Glue's confidence gate was modeled after, though the two are separate codebases.
 
 ---
 
@@ -1181,6 +1181,14 @@ Do not weaken authorization or persistence guarantees simply to make a test pass
 No explicit license file is currently present in the repository.
 
 Define a project license before external distribution.
+
+---
+
+# Related Repositories
+
+- [DualPay](https://github.com/gmr9387/Dualpay) — flagship product of the Valtaris portfolio
+- [valtaris-nucleus](https://github.com/gmr9387/valtaris-nucleus) — shared backend; this repo's Edge Functions are deployed to its shared `valtaris-nucleus-2` Supabase project
+- [decision-weaver-ai](https://github.com/gmr9387/decision-weaver-ai) — standalone decision-intelligence product in the same portfolio
 
 ---
 
