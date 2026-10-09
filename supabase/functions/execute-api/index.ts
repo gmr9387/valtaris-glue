@@ -109,7 +109,7 @@ function hasCredentials(service: string): boolean {
     case "openai": return !!Deno.env.get("OPENAI_KEY");
     case "sendgrid": return !!Deno.env.get("SENDGRID_KEY");
     case "twilio": return !!Deno.env.get("TWILIO_SID") && !!Deno.env.get("TWILIO_TOKEN") && !!Deno.env.get("TWILIO_PHONE");
-    case "nucleus": return !!Deno.env.get("NUCLEUS_API_KEY");
+    case "nucleus": return !!Deno.env.get("NUCLEUS_API_KEY_GLUE");
     default: return false;
   }
 }
@@ -235,10 +235,16 @@ async function executeTwilio(action: string, data: Record<string, unknown>) {
 // nucleus base URLs are not secret — only the x-api-key credential is.
 // Points at valtaris-nucleus-2 (qrqekucwdfyqqzomuble) -- the old nucleus
 // project (bpqukcsaoporhvdtfyza) is paused/superseded.
+//
+// Uses its own secret name (NUCLEUS_API_KEY_GLUE) rather than the plain
+// NUCLEUS_API_KEY that DualPay's nucleus-* proxy functions read: Supabase
+// Edge Function secrets are project-wide, and DualPay's proxies now live
+// in this same shared project, so a shared name would make Glue silently
+// authenticate as DualPay's api_clients row instead of its own.
 const NUCLEUS_BASE_URL = "https://qrqekucwdfyqqzomuble.supabase.co/functions/v1";
 
 async function executeNucleus(action: string, data: Record<string, unknown>) {
-  const key = getEnvOrThrow("NUCLEUS_API_KEY");
+  const key = getEnvOrThrow("NUCLEUS_API_KEY_GLUE");
 
   if (action === "guardianStatus") {
     const resp = await fetch(`${NUCLEUS_BASE_URL}/guardian-status`, {
