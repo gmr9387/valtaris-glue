@@ -1,0 +1,30 @@
+name: Test Glue Nucleus API Key
+
+on:
+  push:
+    branches:
+      - test/glue-nucleus-key-check
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call execute-api nucleus.guardianStatus
+        run: |
+          curl -sS -X POST "https://qrqekucwdfyqqzomuble.supabase.co/functions/v1/execute-api" \
+            -H "Authorization: Bearer ${ANON_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"service":"nucleus","action":"guardianStatus","data":{}}' \
+            -w "\nHTTP_STATUS:%{http_code}\n"
+        env:
+          ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFycWVrdWN3ZGZ5cXF6b211YmxlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwNzgwMTgsImV4cCI6MjEwNTY1NDAxOH0.rrTeUKRTaA3UUfh3f_isWEYw1zjlVX9nBQ1MW2UbZVQ
+
+      - name: Call execute-api nucleus.adjudicateClaim
+        run: |
+          curl -sS -X POST "https://qrqekucwdfyqqzomuble.supabase.co/functions/v1/execute-api" \
+            -H "Authorization: Bearer ${ANON_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"service":"nucleus","action":"adjudicateClaim","data":{"claim_id":"glue-wiring-check-001","member_id":"test-member","payer_name":"Test Payer","procedure_code":"99213","billed_amount_cents":10000}}' \
+            -w "\nHTTP_STATUS:%{http_code}\n"
+        env:
+          ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFycWVrdWN3ZGZ5cXF6b211YmxlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwNzgwMTgsImV4cCI6MjEwNTY1NDAxOH0.rrTeUKRTaA3UUfh3f_isWEYw1zjlVX9nBQ1MW2UbZVQ
